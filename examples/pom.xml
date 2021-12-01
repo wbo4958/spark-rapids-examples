@@ -41,18 +41,19 @@
         <spark.version>3.0.1</spark.version>
         <scala.version>2.12.8</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
+        <xgb.version>1.6.0-SNAPSHOT</xgb.version>
     </properties>
 
     <dependencies>
         <dependency>
-            <groupId>com.nvidia</groupId>
-            <artifactId>xgboost4j_3.0</artifactId>
-            <version>${xgboost.version}</version>
+            <groupId>ml.dmlc</groupId>
+            <artifactId>xgboost4j-gpu_2.12</artifactId>
+            <version>${xgb.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.nvidia</groupId>
-            <artifactId>xgboost4j-spark_3.0</artifactId>
-            <version>${xgboost.version}</version>
+            <groupId>ml.dmlc</groupId>
+            <artifactId>xgboost4j-spark-gpu_2.12</artifactId>
+            <version>${xgb.version}</version>
         </dependency>
         <dependency>
             <groupId>org.scala-lang</groupId>
