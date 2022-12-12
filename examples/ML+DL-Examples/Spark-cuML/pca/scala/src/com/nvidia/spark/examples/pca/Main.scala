@@ -23,31 +23,24 @@ import org.apache.spark.sql.functions._
 
 object Main {
   def main(args: Array[String]): Unit = {
+    if (args.length != 1) {
+      println("Usage: Main <input>")
+      System.exit(1)
+    }
+    val dataPath = args(0)
+    print("Starting PCA example")
+
     val spark = SparkSession.builder().appName("PCA Example").getOrCreate()
-    val dim = 2048
-    val rows = 50000
-    val r = new scala.util.Random(0)
-
-    // generate dummy data
-    var prepareDf = spark.createDataFrame(
-      (0 until rows).map(_ => Tuple1(Array.fill(dim)(r.nextDouble))))
-      .withColumnRenamed("_1", "array_feature")
-      .select((0 until dim).map(i => col("array_feature").getItem(i)): _*)
-    // save to parquet files
-    prepareDf.write.mode("overwrite").parquet("PCA_raw_parquet")
-
     // load the parquet files
-    val df = spark.read.parquet("PCA_raw_parquet")
+    val df = spark.read.parquet(dataPath)
 
     // mean centering via ETL
-    val avgValue = df.select(
-      (0 until dim).map("array_feature[" + _ + "]").map(col).map(avg): _*).first()
-    val inputCols = (0 until dim).map(i =>
-      (col("array_feature[" + i + "]") - avgValue.getDouble(i)).alias("feature_"+i)
-    )
-    val meanCenterDf = df.select(inputCols:_*)
+    val avgValue = df.select(df.schema.names.map(col).map(avg): _*).first()
+    val inputCols = (0 until df.schema.names.length).map(i =>
+      (col(df.schema.names(i)) - avgValue.getDouble(i)).alias("fea_" + i))
+    val meanCenterDf = df.select(inputCols: _*)
 
-    val dataDf = meanCenterDf.withColumn("feature",array(meanCenterDf.columns.map(col):_*))
+    val dataDf = meanCenterDf.withColumn("feature", array(meanCenterDf.columns.map(col): _*))
 
     val pcaGpu = new com.nvidia.spark.ml.feature.PCA().setInputCol("feature").setOutputCol("pca_features").setK(3)
     // GPU train
@@ -70,11 +63,11 @@ object Main {
     val pcaModelCpu = pcaCpu.fit(vectorDf)
     val cpuEnd = System.currentTimeMillis()
 
-    
+
     println("GPU training: ")
-    println( (gpuEnd - gpuStart) / 1000 + " seconds")
+    println((gpuEnd - gpuStart) / 1000 + " seconds")
     println("CPU training: ")
-    println( (cpuEnd - cpuStart) / 1000 + " seconds")
+    println((cpuEnd - cpuStart) / 1000 + " seconds")
 
     // transform
     pcaModelGpu.transform(vectorDf).select("pca_features").show(false)
