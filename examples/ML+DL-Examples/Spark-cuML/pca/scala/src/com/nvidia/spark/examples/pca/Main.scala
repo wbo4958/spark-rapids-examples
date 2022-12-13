@@ -23,17 +23,19 @@ import org.apache.spark.sql.functions._
 
 object Main {
   def main(args: Array[String]): Unit = {
+    println("args v", args.length)
     if (args.length != 1) {
       println("Usage: Main <input>")
       System.exit(1)
     }
     val dataPath = args(0)
-    print("Starting PCA example")
+    println("Starting PCA example")
 
     val spark = SparkSession.builder().appName("PCA Example").getOrCreate()
     // load the parquet files
     val df = spark.read.parquet(dataPath)
 
+    val gpuStart = System.currentTimeMillis()
     // mean centering via ETL
     val avgValue = df.select(df.schema.names.map(col).map(avg): _*).first()
     val inputCols = (0 until df.schema.names.length).map(i =>
@@ -42,30 +44,31 @@ object Main {
 
     val dataDf = meanCenterDf.withColumn("feature", array(meanCenterDf.columns.map(col): _*))
 
+    println("GPU training")
     val pcaGpu = new com.nvidia.spark.ml.feature.PCA().setInputCol("feature").setOutputCol("pca_features").setK(3)
     // GPU train
-    val gpuStart = System.currentTimeMillis()
+
     val pcaModelGpu = pcaGpu.fit(dataDf)
     val gpuEnd = System.currentTimeMillis()
+    println("GPU training Done: ")
+    println((gpuEnd - gpuStart) / 1000 + " seconds")
 
+
+    val cpuStart = System.currentTimeMillis()
     // use udf to meet standard CPU ML algo input requirement: Vector input
     val convertToVector = udf((array: Seq[Double]) => {
       Vectors.dense(array.map(_.toDouble).toArray)
     })
-
     val vectorDf = dataDf.withColumn("feature_vec", convertToVector(col("feature")))
-
     // use original Spark ML PCA class
     val pcaCpu = new org.apache.spark.ml.feature.PCA().setInputCol("feature_vec").setOutputCol("pca_features").setK(3)
-
     // CPU train
-    val cpuStart = System.currentTimeMillis()
+
     val pcaModelCpu = pcaCpu.fit(vectorDf)
     val cpuEnd = System.currentTimeMillis()
 
 
-    println("GPU training: ")
-    println((gpuEnd - gpuStart) / 1000 + " seconds")
+
     println("CPU training: ")
     println((cpuEnd - cpuStart) / 1000 + " seconds")
 
