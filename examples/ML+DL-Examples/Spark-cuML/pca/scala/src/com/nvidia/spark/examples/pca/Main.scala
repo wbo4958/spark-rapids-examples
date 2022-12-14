@@ -15,9 +15,7 @@
  */
 
 
-package com.nvidia.spark.examples.pca
-
-import org.apache.spark.ml.linalg._
+import org.apache.spark.ml.feature.{PCA, VectorAssembler}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 
@@ -35,45 +33,34 @@ object Main {
     // load the parquet files
     val df = spark.read.parquet(dataPath)
 
-    val gpuStart = System.currentTimeMillis()
+    val start = System.currentTimeMillis()
+
     // mean centering via ETL
     val avgValue = df.select(df.schema.names.map(col).map(avg): _*).first()
     val inputCols = (0 until df.schema.names.length).map(i =>
       (col(df.schema.names(i)) - avgValue.getDouble(i)).alias("fea_" + i))
     val meanCenterDf = df.select(inputCols: _*)
 
-    val dataDf = meanCenterDf.withColumn("feature", array(meanCenterDf.columns.map(col): _*))
+    val vectorAssembler = new VectorAssembler()
+      .setInputCols(meanCenterDf.columns)
+      .setOutputCol("features")
 
-    println("GPU training")
-    val pcaGpu = new com.nvidia.spark.ml.feature.PCA().setInputCol("feature").setOutputCol("pca_features").setK(3)
-    // GPU train
+    val dataDf = vectorAssembler.transform(meanCenterDf)
 
-    val pcaModelGpu = pcaGpu.fit(dataDf)
-    val gpuEnd = System.currentTimeMillis()
-    println("GPU training Done: ")
-    println((gpuEnd - gpuStart) / 1000 + " seconds")
+    val pca = new PCA()
+      .setInputCol("features")
+      .setOutputCol("pca_features")
+      .setK(3)
 
+    val pcaModelCpu = pca.fit(dataDf)
 
-    val cpuStart = System.currentTimeMillis()
-    // use udf to meet standard CPU ML algo input requirement: Vector input
-    val convertToVector = udf((array: Seq[Double]) => {
-      Vectors.dense(array.map(_.toDouble).toArray)
-    })
-    val vectorDf = dataDf.withColumn("feature_vec", convertToVector(col("feature")))
-    // use original Spark ML PCA class
-    val pcaCpu = new org.apache.spark.ml.feature.PCA().setInputCol("feature_vec").setOutputCol("pca_features").setK(3)
-    // CPU train
-
-    val pcaModelCpu = pcaCpu.fit(vectorDf)
-    val cpuEnd = System.currentTimeMillis()
+    val end = System.currentTimeMillis()
 
 
+    println("Training done")
+    println((end - start) / 1000 + " seconds")
 
-    println("CPU training: ")
-    println((cpuEnd - cpuStart) / 1000 + " seconds")
-
-    // transform
-    pcaModelGpu.transform(vectorDf).select("pca_features").show(false)
-    pcaModelCpu.transform(vectorDf).select("pca_features").show(false)
+    pcaModelCpu.transform(dataDf).select("pca_features").show(false)
+    spark.stop()
   }
 }
