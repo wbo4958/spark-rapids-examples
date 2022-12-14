@@ -40,19 +40,18 @@ object Main {
 
     val start = System.currentTimeMillis()
 
-    // mean centering via ETL
-    val avgValue = df.select(df.schema.names.map(col).map(avg): _*).first()
-    val inputCols = (0 until df.schema.names.length).map(i =>
-      (col(df.schema.names(i)) - avgValue.getDouble(i)).alias("fea_" + i))
-
-    val meanCenterDf = df.select(inputCols: _*)
-
-    val dataDf = if (testType.toLowerCase() == "cpu") {
+    val trainDf = if (testType.toLowerCase() == "cpu") {
       val vectorAssembler = new VectorAssembler()
-        .setInputCols(meanCenterDf.columns)
+        .setInputCols(df.columns)
         .setOutputCol("features")
-      vectorAssembler.transform(meanCenterDf)
+      vectorAssembler.transform(df)
     } else {
+      // mean centering via ETL is needed for GPU.
+      val avgValue = df.select(df.schema.names.map(col).map(avg): _*).first()
+      val inputCols = (0 until df.schema.names.length).map(i =>
+        (col(df.schema.names(i)) - avgValue.getDouble(i)).alias("fea_" + i))
+
+      val meanCenterDf = df.select(inputCols: _*)
       meanCenterDf.withColumn("features", array(meanCenterDf.columns.map(col): _*)).select("features")
     }
 
@@ -61,16 +60,16 @@ object Main {
       .setOutputCol("pca_features")
       .setK(3)
 
-    val model = pca.fit(dataDf)
+    val model = pca.fit(trainDf)
 
     val end = System.currentTimeMillis()
 
     println("Training done: " + ((end - start) / 1000) + " seconds")
 
     val testDf = if (testType.toLowerCase() == "cpu") {
-      dataDf
+      trainDf
     } else {
-      dataDf.withColumn("features_vec",
+      trainDf.withColumn("features_vec",
         array_to_vector(col("features"))).select(col("features_vec").alias("features"))
     }
     model.transform(testDf).select("pca_features").show(false)
