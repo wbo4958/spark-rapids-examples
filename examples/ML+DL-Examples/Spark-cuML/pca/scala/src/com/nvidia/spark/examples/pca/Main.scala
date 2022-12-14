@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+package com.nvidia.spark.examples.pca
 
 import org.apache.spark.ml.feature.{PCA, VectorAssembler}
 import org.apache.spark.sql.SparkSession
