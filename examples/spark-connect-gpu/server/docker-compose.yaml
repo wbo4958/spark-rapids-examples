@@ -80,6 +80,7 @@ services:
     hostname: spark-connect-server
     environment:
       <<: *spark-common-env
+      SPARK_CONNECT_AUTHENTICATE_TOKEN: ${SPARK_CONNECT_AUTHENTICATE_TOKEN:-""}
     ports:
       - "4040:4040"               # Spark Driver WebUI
       - "15002:15002"             # Spark Connect grpc

@@ -22,3 +22,9 @@ elif [[ "$SPARK_PUBLIC_DNS" != "" ]]; then
   # handles default localhost or any other custom value
   export SPARK_PUBLIC_DNS
 fi
+
+if [[ "$SPARK_CONNECT_AUTHENTICATE_TOKEN" == "" ]]; then
+  unset SPARK_CONNECT_AUTHENTICATE_TOKEN
+else
+  export SPARK_CONNECT_AUTHENTICATE_TOKEN
+fi
