@@ -14,6 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Build stage
+FROM maven:3.8-openjdk-17 AS builder
+# Set platform to linux/amd64
+ENV DOCKER_DEFAULT_PLATFORM=linux/amd64
+# Copy the entire project
+COPY auth /build
+WORKDIR /build
+# Build all modules
+RUN mvn clean install -DskipTests
 
 FROM apache/spark:4.0.0
 
@@ -24,6 +33,9 @@ ARG REPO_URL
 USER root
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install -r /tmp/requirements.txt
+
+COPY --from=builder /build/target/connect-auth-1.0-SNAPSHOT.jar /opt/spark-rapids/jars/
+
 
 RUN mkdir -p /opt/spark-rapids/jars
 RUN chown -R spark:spark /opt/spark-rapids
@@ -37,3 +49,4 @@ ENV REPO_URL=${REPO_URL}
 RUN wget -q ${REPO_URL}/com/nvidia/rapids-4-spark_2.13/${RAPIDS_VERSION}/rapids-4-spark_2.13-${RAPIDS_VERSION}-cuda${CUDA_VERSION}.jar -O /opt/spark-rapids/jars/rapids-4-spark-sql.jar
 COPY spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 COPY spark-env.sh /opt/spark/conf/spark-env.sh
+COPY credentials.txt /opt/spark/conf/credentials.txt
