@@ -43,6 +43,10 @@ COPY scala /home/spark/demo/scala
 COPY --from=builder /build/target/*-jar-with-dependencies.jar /home/spark/demo/scala/
 COPY python /home/spark/demo/python
 
+# Add SSL cert
+COPY certs/server.crt /home/spark/demo/server.crt
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/home/spark/demo/server.crt
+
 # Prepare NDS, make NDS as a package.
 COPY nds /home/spark/demo/nds
 RUN git clone --depth 1 -b dev https://github.com/NVIDIA/spark-rapids-benchmarks /tmp/spark-rapids-benchmarks && \
