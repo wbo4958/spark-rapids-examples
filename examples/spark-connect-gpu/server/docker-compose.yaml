@@ -89,9 +89,46 @@ services:
       - spark-worker
     command: >
       /opt/spark/sbin/start-connect-server.sh
+        --name="Spark Connect server - GPU"
         --driver-memory=24G
         --conf spark.executor.memory=28G
         --conf spark.executor.cores=8
+
+  # Spark Connect Server with cpu only
+  spark-connect-server-cpu:
+    <<: *spark-common
+    image: spark-connect-server-cpu-image
+    build:
+      context: ./spark-connect-server-cpu
+      dockerfile: Dockerfile
+      args:
+        - REPO_URL=${REPO_URL:-https://repo1.maven.org/maven2}
+    container_name: spark-connect-server-cpu
+    hostname: spark-connect-server-cpu
+    environment:
+      <<: *spark-common-env
+    expose:
+      - 15002                     # Visible to nginx proxy service
+    ports:
+      - "4041:4040"               # Spark Driver WebUI
+    depends_on:
+      - spark-master
+      - spark-worker
+      - spark-connect-server
+    command: >
+      /opt/spark/sbin/start-connect-server.sh
+        --name="Spark Connect server - CPU"
+        --driver-memory=5G
+        --conf spark.executor.memory=28G
+        --conf spark.executor.cores=4
+        --conf spark.cores.max=4
+        --conf spark.driver.maxResultSize=3g
+        --conf spark.eventLog.dir=/data/spark-events
+        --conf spark.eventLog.enabled=true
+        --conf spark.eventLog.compress=true
+        --conf spark.local.dir=/opt/spark/work
+        --conf spark.locality.wait=0
+        --conf spark.master=spark://spark-master:7077
 
   proxy-service:
     build:
@@ -110,6 +147,7 @@ services:
       - spark-master
       - spark-worker
       - spark-connect-server
+      - spark-connect-server-cpu
     restart: unless-stopped
 
 networks:
