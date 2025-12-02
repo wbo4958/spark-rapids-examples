@@ -13,6 +13,8 @@ public class GrpcGateway {
     private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub cpuService;
     private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub gpuService;
 
+    private static int count;
+
     public GrpcGateway(String cpuHost, String gpuHost) {
         this.cpuChannel = ManagedChannelBuilder.forAddress(cpuHost, 15002).usePlaintext().build();
         this.cpuService = SparkConnectServiceGrpc.newBlockingStub(cpuChannel);
@@ -25,6 +27,11 @@ public class GrpcGateway {
 //        public void config(ConfigRequest request, StreamObserver<ConfigResponse> responseObserver) {
 //        }
 
+        private SparkConnectServiceGrpc.SparkConnectServiceBlockingStub chooseAService() {
+            return (count++ % 2) == 1 ? cpuService : gpuService;
+//            return cpuService;
+        }
+
         @Override
         public void executePlan(ExecutePlanRequest request, StreamObserver<ExecutePlanResponse> responseObserver) {
             String operationId = request.getOperationId();
@@ -32,15 +39,20 @@ public class GrpcGateway {
             String sessionId = request.getSessionId();
             String plan = request.getPlan().toString();
 
-            System.out.println("userId: " + userId + " sessionId: " + sessionId +  " operationId: " + operationId + " plan:" + plan);
+            SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service = chooseAService();
+
+            System.out.println("userId: " + userId + " sessionId: " + sessionId +  " operationId: " + operationId +
+                    " plan:" + plan + "\nRunning on " + service.getChannel().toString());
+            System.out.println("--------------------------------------------");
 
             try {
                 // 1. Call upstream service (Blocking call)
-                Iterator<ExecutePlanResponse> responses = cpuService.executePlan(request);
+                Iterator<ExecutePlanResponse> responses = service.executePlan(request);
 
                 // 2. Iterate through results and stream them back to the client
                 while (responses.hasNext()) {
                     ExecutePlanResponse response = responses.next();
+                    System.out.println("Got Response: " + response.toString());
                     responseObserver.onNext(response);
                 }
 
@@ -60,7 +72,7 @@ public class GrpcGateway {
                 .addService(ServerInterceptors.intercept(new ProxyService()))
                 .build()
                 .start();
-        System.out.println("Proxy Server started on 50051");
+        System.out.println("Proxy Server started on 15002");
         server.awaitTermination();
     }
 
