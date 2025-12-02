@@ -8,12 +8,16 @@ import java.io.IOException;
 import java.util.Iterator;
 
 public class GrpcGateway {
-    private final ManagedChannel channelApple;
-    private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub connectServiceBlockingStub;
+    private final ManagedChannel cpuChannel;
+    private final ManagedChannel gpuChannel;
+    private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub cpuService;
+    private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub gpuService;
 
-    public GrpcGateway(String appleHost) {
-        this.channelApple = ManagedChannelBuilder.forAddress("localhost", 15002).usePlaintext().build();
-        this.connectServiceBlockingStub = SparkConnectServiceGrpc.newBlockingStub(channelApple);
+    public GrpcGateway(String cpuHost, String gpuHost) {
+        this.cpuChannel = ManagedChannelBuilder.forAddress(cpuHost, 15002).usePlaintext().build();
+        this.cpuService = SparkConnectServiceGrpc.newBlockingStub(cpuChannel);
+        this.gpuChannel = ManagedChannelBuilder.forAddress(gpuHost, 15002).usePlaintext().build();
+        this.gpuService = SparkConnectServiceGrpc.newBlockingStub(gpuChannel);
     }
 
     private class ProxyService extends SparkConnectServiceGrpc.SparkConnectServiceImplBase {
@@ -32,7 +36,7 @@ public class GrpcGateway {
 
             try {
                 // 1. Call upstream service (Blocking call)
-                Iterator<ExecutePlanResponse> responses = connectServiceBlockingStub.executePlan(request);
+                Iterator<ExecutePlanResponse> responses = cpuService.executePlan(request);
 
                 // 2. Iterate through results and stream them back to the client
                 while (responses.hasNext()) {
@@ -48,12 +52,10 @@ public class GrpcGateway {
                 responseObserver.onError(e);
             }
         }
-
-
     }
 
     public void start() throws IOException, InterruptedException {
-        Server server = ServerBuilder.forPort(50051)
+        Server server = ServerBuilder.forPort(15002)
 //                .addService(ServerInterceptors.intercept(new ProxyService(), getAuthInterceptor()))
                 .addService(ServerInterceptors.intercept(new ProxyService()))
                 .build()
@@ -63,7 +65,7 @@ public class GrpcGateway {
     }
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        new GrpcGateway("localhost").start();
+        new GrpcGateway("spark-connect-server-cpu", "spark-connect-server").start();
     }
 
 }

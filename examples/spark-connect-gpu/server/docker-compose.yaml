@@ -150,6 +150,24 @@ services:
       - spark-connect-server-cpu
     restart: unless-stopped
 
+  grpc-proxy:
+    build:
+      context: ./grpc-service
+      dockerfile: Dockerfile
+    container_name:  grpc-proxy
+    ports:
+      - "15003:15002"
+    networks:
+      - spark-network
+    depends_on:
+      - spark-master
+      - spark-worker
+      - spark-connect-server-cpu
+      - spark-connect-server
+    command: >
+      java -cp "/opt/spark/conf:/opt/spark/jars/*" com.nvidia.proxy.GrpcGateway
+    restart: unless-stopped
+
 networks:
   spark-network:
     driver: bridge
