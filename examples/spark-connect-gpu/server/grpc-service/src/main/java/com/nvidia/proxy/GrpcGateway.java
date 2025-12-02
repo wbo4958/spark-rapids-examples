@@ -5,21 +5,35 @@ import org.sparkproject.connect.grpc.*;
 import org.sparkproject.connect.grpc.stub.StreamObserver;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.Objects;
 
 public class GrpcGateway {
     private final ManagedChannel cpuChannel;
     private final ManagedChannel gpuChannel;
     private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub cpuService;
     private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub gpuService;
-
     private static int count;
+
+    // Capture the server-side session ID and set it to empty initially. It will
+    // be updated on the first response received of the first Spark Connect Server.
+    // the clientServerSideSessionId will be sent back to client.
+    private String clientServerSideSessionId = "";
+
+    // Map the server side session id to the Spark Connect server.
+    private Map<String, SparkConnectServiceGrpc.SparkConnectServiceBlockingStub> serverSideSessionIdToService;
+    private Map<SparkConnectServiceGrpc.SparkConnectServiceBlockingStub, String> serviceToServerSideSessionId;
 
     public GrpcGateway(String cpuHost, String gpuHost) {
         this.cpuChannel = ManagedChannelBuilder.forAddress(cpuHost, 15002).usePlaintext().build();
         this.cpuService = SparkConnectServiceGrpc.newBlockingStub(cpuChannel);
         this.gpuChannel = ManagedChannelBuilder.forAddress(gpuHost, 15002).usePlaintext().build();
         this.gpuService = SparkConnectServiceGrpc.newBlockingStub(gpuChannel);
+
+        serverSideSessionIdToService = new HashMap<>();
+        serviceToServerSideSessionId = new HashMap<>();
     }
 
     private class ProxyService extends SparkConnectServiceGrpc.SparkConnectServiceImplBase {
@@ -38,11 +52,23 @@ public class GrpcGateway {
             String userId = request.getUserContext().getUserId();
             String sessionId = request.getSessionId();
             String plan = request.getPlan().toString();
+            String clientSideServerSideSessionId = request.getClientObservedServerSideSessionId();
 
             SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service = chooseAService();
+            if (serviceToServerSideSessionId.containsKey(service)) {
+                String serverSideSessionId = serviceToServerSideSessionId.get(service);
+                request = request.toBuilder().setClientObservedServerSideSessionId(serverSideSessionId).build();
+            } else {
+                request = request.toBuilder().clearClientObservedServerSideSessionId().build();
+            }
 
-            System.out.println("userId: " + userId + " sessionId: " + sessionId +  " operationId: " + operationId +
-                    " plan:" + plan + "\nRunning on " + service.getChannel().toString());
+            System.out.println(
+                    "userId: " + userId +
+                            " sessionId: " + sessionId +
+                            " clientSideServerSideSessionId " + clientSideServerSideSessionId +
+                            " serverSide sessionId: " + request.getClientObservedServerSideSessionId() +
+                            " operationId: " + operationId +
+                            " plan:" + plan + "\nRunning on " + service.getChannel().toString());
             System.out.println("--------------------------------------------");
 
             try {
@@ -52,7 +78,20 @@ public class GrpcGateway {
                 // 2. Iterate through results and stream them back to the client
                 while (responses.hasNext()) {
                     ExecutePlanResponse response = responses.next();
-                    System.out.println("Got Response: " + response.toString());
+
+                    String serverSideSessionId = response.getServerSideSessionId();
+                    if (!serverSideSessionIdToService.containsKey(serverSideSessionId)) {
+                        serverSideSessionIdToService.put(serverSideSessionId, service);
+                        serviceToServerSideSessionId.put(service, serverSideSessionId);
+                    }
+
+                    if (Objects.equals(clientServerSideSessionId, "")) {
+                        clientServerSideSessionId = serverSideSessionId;
+                    } else {
+                        response = response.toBuilder().setServerSideSessionId(clientServerSideSessionId).build();
+                    }
+
+                    System.out.println("Got Response: " + response);
                     responseObserver.onNext(response);
                 }
 
