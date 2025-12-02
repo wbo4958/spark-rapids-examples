@@ -79,6 +79,7 @@ public class GrpcGateway {
                 while (responses.hasNext()) {
                     ExecutePlanResponse response = responses.next();
 
+                    // TODO: verify if the serverSideSessionId is matching with the previous one.
                     String serverSideSessionId = response.getServerSideSessionId();
                     if (!serverSideSessionIdToService.containsKey(serverSideSessionId)) {
                         serverSideSessionIdToService.put(serverSideSessionId, service);
