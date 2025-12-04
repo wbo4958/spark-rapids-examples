@@ -32,6 +32,8 @@ FROM apache/spark:4.0.0
 USER root
 COPY --from=builder /build/target/com.nvidia.grpc-proxy-1.0-SNAPSHOT.jar /opt/spark/jars/
 RUN chown spark:spark /opt/spark/jars/com.nvidia.grpc-proxy-1.0-SNAPSHOT.jar
+COPY certs /opt/spark/certs
+RUN chown -R spark:spark /opt/spark/certs
 
 USER spark
 SHELL [ "/bin/bash", "-c" ]

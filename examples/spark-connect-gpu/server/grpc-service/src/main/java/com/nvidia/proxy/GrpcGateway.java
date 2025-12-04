@@ -4,6 +4,7 @@ import org.apache.spark.connect.proto.*;
 import org.sparkproject.connect.grpc.*;
 import org.sparkproject.connect.grpc.stub.StreamObserver;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -106,10 +107,32 @@ public class GrpcGateway {
         }
     }
 
+    private ServerInterceptor getAuthInterceptor() {
+        return new ServerInterceptor() {
+            @Override
+            public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                    ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+
+                String token = headers.get(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER));
+
+                // Simple check: Token must be "Bearer spark-secret-token"
+                if (token == null || !token.equals("Bearer spark-secret-token")) {
+                    call.close(Status.UNAUTHENTICATED.withDescription("Invalid Token"), headers);
+                    return new ServerCall.Listener<ReqT>() {
+                    };
+                }
+                return next.startCall(call, headers);
+            }
+        };
+    }
+
     public void start() throws IOException, InterruptedException {
+        File certChain = new File("/opt/spark/certs/server.crt");
+        File privateKey = new File("/opt/spark/certs/server.key");
+
         Server server = ServerBuilder.forPort(15002)
-//                .addService(ServerInterceptors.intercept(new ProxyService(), getAuthInterceptor()))
-                .addService(ServerInterceptors.intercept(new ProxyService()))
+                .addService(ServerInterceptors.intercept(new ProxyService(), getAuthInterceptor()))
+                .useTransportSecurity(certChain, privateKey)
                 .build()
                 .start();
         System.out.println("Proxy Server started on 15002");
