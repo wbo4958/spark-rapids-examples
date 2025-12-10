@@ -29,12 +29,12 @@ public class GrpcGateway {
 
             var service = router.routePerSession(userId, clientSessionId);
 
-            Optional<String> serverSessionId = sessionManager.getServerSideSessionId(clientSessionId, service);
-            System.out.println("xxxxx => clientSessionId: " + clientSessionId + " get ServerInterceptor: " + serverSessionId.orElse("NO NO NO"));
+            Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(clientSessionId, service);
+            System.out.println("xxxxx => clientSessionId: " + clientSessionId + " get ServerInterceptor: " + clientObservedServerSideSessionId.orElse("NO NO NO"));
 
             // Reset or clear the clientObservedServerSideSessionId field
             var builder = request.toBuilder();
-            serverSessionId.ifPresentOrElse(
+            clientObservedServerSideSessionId.ifPresentOrElse(
                     builder::setClientObservedServerSideSessionId,
                     builder::clearClientObservedServerSideSessionId
             );
@@ -55,18 +55,20 @@ public class GrpcGateway {
                 Iterator<ExecutePlanResponse> responses = service.executePlan(request);
 
                 // 2. Iterate through results and stream them back to the client
+                String consistentSessionId = null;
                 while (responses.hasNext()) {
                     ExecutePlanResponse response = responses.next();
-
-                    String serverSideSessionId = response.getServerSideSessionId();
-                    String old = serverSideSessionId;
-                    sessionManager.storeSessionIds(clientSessionId, serverSideSessionId, service);
-                    serverSideSessionId = sessionManager
-                            .getServerSideSessionId(clientSessionId, serverSideSessionId);
-                    System.out.println("xxxxx clientSessionId: " + clientSessionId +
-                            "server id got: " + old  + " getServerSideSessionId: " + serverSideSessionId);
-                    response = response.toBuilder().setServerSideSessionId(serverSideSessionId).build();
-
+                    // For responses of the same query.
+                    if (consistentSessionId == null) {
+                        consistentSessionId = response.getServerSideSessionId();
+                        String rawId = consistentSessionId;
+                        sessionManager.storeSessionIds(clientSessionId, consistentSessionId, service);
+                        consistentSessionId = sessionManager
+                                .getServerSideSessionId(clientSessionId, consistentSessionId);
+                        System.out.printf("xxxxx => Session ID resolved for client %s: %s → %s%n",
+                                clientSessionId, rawId, consistentSessionId);
+                    }
+                    response = response.toBuilder().setServerSideSessionId(consistentSessionId).build();
                     System.out.println("Got Response: " + response);
                     responseObserver.onNext(response);
                 }
