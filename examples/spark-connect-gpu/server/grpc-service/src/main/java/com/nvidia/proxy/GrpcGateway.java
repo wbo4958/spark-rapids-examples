@@ -9,29 +9,15 @@ import java.io.IOException;
 import java.util.*;
 
 public class GrpcGateway {
-    private final ManagedChannel cpuChannel;
-    private final ManagedChannel gpuChannel;
-    private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub cpuService;
-    private final SparkConnectServiceGrpc.SparkConnectServiceBlockingStub gpuService;
-    private static int count;
+    private final SessionManager sessionManager;
+    private final Router router;
 
-    private SessionManager sessionManager;
-
-    public GrpcGateway(String cpuHost, String gpuHost) {
-        this.cpuChannel = ManagedChannelBuilder.forAddress(cpuHost, 15002).usePlaintext().build();
-        this.cpuService = SparkConnectServiceGrpc.newBlockingStub(cpuChannel);
-        this.gpuChannel = ManagedChannelBuilder.forAddress(gpuHost, 15002).usePlaintext().build();
-        this.gpuService = SparkConnectServiceGrpc.newBlockingStub(gpuChannel);
-
+    public GrpcGateway() {
         sessionManager = new SessionManager();
+        router = new Router();
     }
 
     private class ProxyService extends SparkConnectServiceGrpc.SparkConnectServiceImplBase {
-
-        private SparkConnectServiceGrpc.SparkConnectServiceBlockingStub chooseAService() {
-            return (count++ % 2) == 1 ? cpuService : gpuService;
-//            return cpuService;
-        }
 
         @Override
         public void executePlan(ExecutePlanRequest request, StreamObserver<ExecutePlanResponse> responseObserver) {
@@ -41,10 +27,12 @@ public class GrpcGateway {
             String plan = request.getPlan().toString();
             String clientSideServerSideSessionId = request.getClientObservedServerSideSessionId();
 
-            var service = chooseAService();
+            var service = router.routePerSession(userId, clientSessionId);
 
             Optional<String> serverSessionId = sessionManager.getServerSideSessionId(clientSessionId, service);
             System.out.println("xxxxx => clientSessionId: " + clientSessionId + " get ServerInterceptor: " + serverSessionId.orElse("NO NO NO"));
+
+            // Reset or clear the clientObservedServerSideSessionId field
             var builder = request.toBuilder();
             serverSessionId.ifPresentOrElse(
                     builder::setClientObservedServerSideSessionId,
@@ -126,7 +114,7 @@ public class GrpcGateway {
     }
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        new GrpcGateway("spark-connect-server-cpu", "spark-connect-server").start();
+        new GrpcGateway().start();
     }
 
 }
