@@ -9,6 +9,10 @@ import java.io.IOException;
 import java.util.*;
 
 public class GrpcGateway {
+    private static final Context.Key<String> UNIQ_ID_CONTEXT_KEY = Context.key("uniq_id");
+    private static final Metadata.Key<String> UNIQ_ID_METADATA_KEY =
+            Metadata.Key.of("uniq_id", Metadata.ASCII_STRING_MARSHALLER);
+
     private final SessionManager sessionManager;
     private final Router router;
 
@@ -27,10 +31,12 @@ public class GrpcGateway {
             String plan = request.getPlan().toString();
             String clientSideServerSideSessionId = request.getClientObservedServerSideSessionId();
 
-            var service = router.routePerSession(userId, clientSessionId);
+            var service = router.routePerSession(UNIQ_ID_CONTEXT_KEY.get(), userId, clientSessionId);
 
             Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(clientSessionId, service);
-            System.out.println("xxxxx => clientSessionId: " + clientSessionId + " get ServerInterceptor: " + clientObservedServerSideSessionId.orElse("NO NO NO"));
+            System.out.println("xxxxx executePlan: uniq id: " + UNIQ_ID_CONTEXT_KEY.get() +
+                    " => clientSessionId: " + clientSessionId +
+                    " get ServerInterceptor: " + clientObservedServerSideSessionId.orElse("NO NO NO"));
 
             // Reset or clear the clientObservedServerSideSessionId field
             var builder = request.toBuilder();
@@ -97,7 +103,13 @@ public class GrpcGateway {
                     return new ServerCall.Listener<ReqT>() {
                     };
                 }
-                return next.startCall(call, headers);
+
+                String uniqId = headers.get(UNIQ_ID_METADATA_KEY);  // Extract uniq_id
+                // Create new context with uniq_id attached
+                Context context = Context.current()
+                        .withValue(UNIQ_ID_CONTEXT_KEY, Optional.ofNullable(uniqId).orElse(""));
+
+                return Contexts.interceptCall(context, call, headers, next);
             }
         };
     }

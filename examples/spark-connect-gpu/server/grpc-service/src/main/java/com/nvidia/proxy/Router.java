@@ -38,12 +38,15 @@ public class Router implements Closeable {
     /**
      * Choose a Spark Connect Service.
      *
+     * @param uniqId    the uniqId
      * @param userId    the user id.
      * @param sessionId the session id.
      * @return the Spark Connect Service.
      */
-    public SparkConnectServiceGrpc.SparkConnectServiceBlockingStub routePerSession(String userId,
-                                                                                   String sessionId) {
+    public SparkConnectServiceGrpc.SparkConnectServiceBlockingStub routePerSession(
+            String uniqId,
+            String userId,
+            String sessionId) {
         if (sessionIdToServiceMap.containsKey(sessionId)) {
             return sessionIdToServiceMap.get(sessionId);
         }
