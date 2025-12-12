@@ -31,7 +31,7 @@ public class GrpcGateway {
             String plan = request.getPlan().toString();
             String clientSideServerSideSessionId = request.getClientObservedServerSideSessionId();
 
-            var service = router.routePerSession(UNIQ_ID_CONTEXT_KEY.get(), userId, clientSessionId);
+            var service = router.determineService(UNIQ_ID_CONTEXT_KEY.get(), userId, clientSessionId);
 
             Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(clientSessionId, service);
             System.out.println("xxxxx executePlan: uniq id: " + UNIQ_ID_CONTEXT_KEY.get() +
@@ -87,6 +87,86 @@ public class GrpcGateway {
                 responseObserver.onError(e);
             }
         }
+
+        @Override
+        public void releaseSession(ReleaseSessionRequest request, StreamObserver<ReleaseSessionResponse> responseObserver) {
+            var sessionId = request.getSessionId();
+            var uniqId = UNIQ_ID_CONTEXT_KEY.get();
+            var userId = request.getUserContext().getUserId();
+            var service = router.determineService(uniqId, userId, sessionId);
+            router.releaseSession(uniqId, userId, sessionId);
+            System.out.println("ReleaseSession uniqId: " + uniqId +
+                    " sessionId: " + sessionId + " service: " + service.getChannel().toString());
+            var response = service.releaseSession(request);
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+
+        @Override
+        public void analyzePlan(AnalyzePlanRequest request, StreamObserver<AnalyzePlanResponse> responseObserver) {
+            super.analyzePlan(request, responseObserver);
+        }
+
+        @Override
+        public void config(ConfigRequest request, StreamObserver<ConfigResponse> responseObserver) {
+            var sessionId = request.getSessionId();
+            var uniqId = UNIQ_ID_CONTEXT_KEY.get();
+            var userId = request.getUserContext().getUserId();
+
+            var service = router.determineService(uniqId, userId, sessionId);
+            System.out.println("Config uniqId: " + uniqId +
+                    " sessionId: " + sessionId + " service: " + service.getChannel().toString());
+
+            Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(sessionId, service);
+
+            var builder = request.toBuilder();
+            clientObservedServerSideSessionId.ifPresentOrElse(
+                    builder::setClientObservedServerSideSessionId,
+                    builder::clearClientObservedServerSideSessionId
+            );
+            request = builder.build();
+
+            var response = service.config(request);
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public StreamObserver<AddArtifactsRequest> addArtifacts(StreamObserver<AddArtifactsResponse> responseObserver) {
+            return super.addArtifacts(responseObserver);
+        }
+
+        @Override
+        public void artifactStatus(ArtifactStatusesRequest request, StreamObserver<ArtifactStatusesResponse> responseObserver) {
+            var sessionId = request.getSessionId();
+            var uniqId = UNIQ_ID_CONTEXT_KEY.get();
+            var userId = request.getUserContext().getUserId();
+            var service = router.determineService(uniqId, userId, sessionId);
+            System.out.println("Config uniqId: " + uniqId +
+                    " sessionId: " + sessionId + " service: " + service.getChannel().toString());
+            super.artifactStatus(request, responseObserver);
+        }
+
+        @Override
+        public void interrupt(InterruptRequest request, StreamObserver<InterruptResponse> responseObserver) {
+            super.interrupt(request, responseObserver);
+        }
+
+        @Override
+        public void reattachExecute(ReattachExecuteRequest request, StreamObserver<ExecutePlanResponse> responseObserver) {
+            super.reattachExecute(request, responseObserver);
+        }
+
+        @Override
+        public void releaseExecute(ReleaseExecuteRequest request, StreamObserver<ReleaseExecuteResponse> responseObserver) {
+            super.releaseExecute(request, responseObserver);
+        }
+
+        @Override
+        public void fetchErrorDetails(FetchErrorDetailsRequest request, StreamObserver<FetchErrorDetailsResponse> responseObserver) {
+            super.fetchErrorDetails(request, responseObserver);
+        }
     }
 
     private ServerInterceptor getAuthInterceptor() {
@@ -105,6 +185,12 @@ public class GrpcGateway {
                 }
 
                 String uniqId = headers.get(UNIQ_ID_METADATA_KEY);  // Extract uniq_id
+
+                if (Optional.ofNullable(uniqId).isEmpty() || uniqId.trim().isEmpty()) {
+                    call.close(Status.INVALID_ARGUMENT.withDescription("Invalid uniq_id"), headers);
+                    return new ServerCall.Listener<ReqT>() {
+                    };
+                }
                 // Create new context with uniq_id attached
                 Context context = Context.current()
                         .withValue(UNIQ_ID_CONTEXT_KEY, Optional.ofNullable(uniqId).orElse(""));
