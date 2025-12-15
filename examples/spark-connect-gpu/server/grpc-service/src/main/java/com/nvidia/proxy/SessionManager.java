@@ -3,6 +3,8 @@ package com.nvidia.proxy;
 import org.apache.spark.connect.proto.SparkConnectServiceGrpc;
 
 import java.util.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * 1. Client creates session Id
@@ -12,6 +14,7 @@ import java.util.*;
  * 5. Client stores to server session id.
  */
 public class SessionManager {
+    private static final Logger LOG = Logger.getLogger(SessionManager.class.getName());
 
     /**
      * Maintains a mapping between client-side session IDs and server-side session IDs for Spark Connect.
@@ -25,7 +28,9 @@ public class SessionManager {
     // Map the services to the Map of client session id to server session id.
     private Map<SparkConnectServiceGrpc.SparkConnectServiceBlockingStub, Map<String, String>> serviceToSessionIdMap = new HashMap<>();
 
-
+    public SessionManager() {
+        LOG.setLevel(Level.FINE);
+    }
     /**
      * Get the server side session id according to the client session id.
      * @param clientSideSessionId the client side session id
@@ -50,10 +55,15 @@ public class SessionManager {
      */
     public Optional<String> getServerSideSessionId(String clientSideSessionId,
                                                    SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service) {
-        System.out.println("getServerSideSessionId handles clientSideSessionId: " + clientSideSessionId + " service: " + service +
-                 " toal map: " + serviceToSessionIdMap);
-        return Optional.ofNullable(serviceToSessionIdMap.get(service)).map(
-                sessionIdMap -> sessionIdMap.get(clientSideSessionId));
+        Optional<String> result = Optional.ofNullable(serviceToSessionIdMap.get(service))
+                .map(sessionIdMap -> sessionIdMap.get(clientSideSessionId));
+
+        if (LOG.isLoggable(Level.FINE)) {
+            LOG.fine(String.format("[SessionManager] getServerSideSessionId: clientSessionId=%s, found=%s, serverSessionId=%s",
+                    clientSideSessionId, result.isPresent(), result.orElse("N/A")));
+        }
+
+        return result;
     }
 
     /**
@@ -67,17 +77,16 @@ public class SessionManager {
     public void storeSessionIds(String clientSideSessionId,
                                 String serverSideSessionId,
                                 SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service) {
-        Map<String, String> clientToServerSessionIdMap;
+        Map<String, String> clientToServerSessionIdMap = serviceToSessionIdMap
+                .computeIfAbsent(service, k -> new HashMap<>());
 
-        if (!serviceToSessionIdMap.containsKey(service)) {
-            clientToServerSessionIdMap = new HashMap<>();
-        } else {
-            clientToServerSessionIdMap = serviceToSessionIdMap.get(service);
-        }
+        boolean isNewMapping = !clientToServerSessionIdMap.containsKey(clientSideSessionId);
         clientToServerSessionIdMap.put(clientSideSessionId, serverSideSessionId);
-        serviceToSessionIdMap.put(service, clientToServerSessionIdMap);
-        System.out.println("storeSessionIds put client session id: " + clientSideSessionId +
-                " server session id: " + serverSideSessionId + " into service: " + service + ": " + serviceToSessionIdMap);
+
+        if (LOG.isLoggable(Level.FINE)) {
+            LOG.fine(String.format("[SessionManager] storeSessionIds: clientSessionId=%s, serverSessionId=%s, isNew=%s, totalMappings=%d",
+                    clientSideSessionId, serverSideSessionId, isNewMapping, clientToServerSessionIdMap.size()));
+        }
     }
 
 }
