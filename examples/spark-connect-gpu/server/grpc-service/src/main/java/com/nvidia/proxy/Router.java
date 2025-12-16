@@ -1,5 +1,6 @@
 package com.nvidia.proxy;
 
+import com.nvidia.proxy.beans.ServiceDetermination;
 import org.apache.spark.connect.proto.SparkConnectServiceGrpc;
 import org.sparkproject.connect.grpc.ManagedChannel;
 import org.sparkproject.connect.grpc.ManagedChannelBuilder;
@@ -173,16 +174,17 @@ public class Router implements Closeable {
      * @param sessionId the Spark session identifier
      * @return the appropriate SparkConnectService blocking stub (CPU or GPU)
      */
-    public SparkConnectServiceGrpc.SparkConnectServiceBlockingStub determineService(
+    public ServiceDetermination determineService(
             String uniqId,
             String userId,
             String sessionId) {
 
         SparkConnectServiceGrpc.SparkConnectServiceBlockingStub selectedService;
+        Map<String, String> configs = Collections.emptyMap();
         String clusterType;
 
         if (plugin.isPresent()) {
-            var configs = plugin.get().suggestConfigurations(uniqId, userId, sessionId);
+            configs = plugin.get().suggestConfigurations(uniqId, userId, sessionId);
             if (configs != null && configs.containsKey("cluster.type")) {
                 if (Objects.equals(configs.get("cluster.type"), "cpu")) {
                     selectedService = cpuService;
@@ -194,6 +196,7 @@ public class Router implements Closeable {
                     selectedService = cpuService;
                     clusterType = "cpu(default)";
                 }
+                configs.remove("cluster.type");
             } else {
                 selectedService = cpuService;
                 clusterType = "cpu(no-config)";
@@ -213,8 +216,10 @@ public class Router implements Closeable {
             LOG.fine(String.format("[Router] determineService: uniqId=%s, userId=%s, sessionId=%s, clusterType=%s",
                     uniqId, userId, sessionId, clusterType));
         }
-
-        return selectedService;
+        if (configs == null) {
+            configs = Collections.emptyMap();
+        }
+        return new ServiceDetermination(selectedService, configs);
     }
 
     /**

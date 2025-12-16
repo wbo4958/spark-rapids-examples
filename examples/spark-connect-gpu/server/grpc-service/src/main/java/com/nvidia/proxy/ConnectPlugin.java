@@ -12,10 +12,10 @@ public interface ConnectPlugin {
      * @param sessionId the Spark session identifier
      * @return a map of suggested Spark configuration properties
      */
-    public Map<String, String> suggestConfigurations(String uniqId,
-                                                     String userId,
-                                                     String sessionId
-                                                     );
+    Map<String, String> suggestConfigurations(String uniqId,
+                                              String userId,
+                                              String sessionId
+    );
 
     /**
      * Releases the session associated with the given identifiers.
@@ -25,5 +25,5 @@ public interface ConnectPlugin {
      * @param userId    user id
      * @param sessionId the spark session id
      */
-    public void releaseSession(String uniqId, String userId, String sessionId);
+    void releaseSession(String uniqId, String userId, String sessionId);
 }
