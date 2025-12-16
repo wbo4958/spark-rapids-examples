@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example ConnectPlugin implementation packaged as a standalone Maven module.
+  The artifact depends on the grpc-proxy module so it can implement the
+  com.nvidia.proxy.ConnectPlugin interface and be discovered via ServiceLoader.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.nvidia</groupId>
+    <artifactId>connect-plugin</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>connect-plugin</name>
+    <description>Example implementation of ConnectPlugin for Spark Connect GPU demo</description>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <grpc.proxy.version>1.0-SNAPSHOT</grpc.proxy.version>
+    </properties>
+
+    <dependencies>
+        <!-- Provides the ConnectPlugin interface used by the Router ServiceLoader -->
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>grpc-proxy</artifactId>
+            <version>${grpc.proxy.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>17</release>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+

@@ -18,12 +18,15 @@
 FROM maven:3.8-openjdk-17 AS builder
 # Set platform to linux/amd64
 ENV DOCKER_DEFAULT_PLATFORM=linux/amd64
-# Copy the entire project
+# Copy the grpc-service project
 COPY src /build/src
 COPY pom.xml /build/pom.xml
+# Copy the aether plugin project
+COPY aether /build/aether
 WORKDIR /build
 # Build all modules
-RUN mvn clean install -DskipTests
+RUN mvn clean install -DskipTests \
+ && mvn -f aether/pom.xml clean package -DskipTests
 
 
 # Spark connect client image
@@ -32,6 +35,8 @@ FROM apache/spark:4.0.0
 USER root
 COPY --from=builder /build/target/com.nvidia.grpc-proxy-1.0-SNAPSHOT.jar /opt/spark/jars/
 RUN chown spark:spark /opt/spark/jars/com.nvidia.grpc-proxy-1.0-SNAPSHOT.jar
+COPY --from=builder /build/aether/target/connect-plugin-1.0-SNAPSHOT.jar /opt/spark/jars/
+RUN chown spark:spark /opt/spark/jars/connect-plugin-1.0-SNAPSHOT.jar
 COPY certs /opt/spark/certs
 RUN chown -R spark:spark /opt/spark/certs
 
