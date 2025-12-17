@@ -89,10 +89,11 @@ services:
       - spark-worker
     command: >
       /opt/spark/sbin/start-connect-server.sh
-        --name="Spark Connect server - GPU"
+        --name="GPU Cluster"
         --driver-memory=24G
-        --conf spark.executor.memory=28G
+        --conf spark.executor.memory=14G
         --conf spark.executor.cores=8
+        --conf spark.cores.max=8
 
   # Spark Connect Server with cpu only
   spark-connect-server-cpu:
@@ -117,9 +118,9 @@ services:
       - spark-connect-server
     command: >
       /opt/spark/sbin/start-connect-server.sh
-        --name="Spark Connect server - CPU"
+        --name="CPU Cluster"
         --driver-memory=5G
-        --conf spark.executor.memory=28G
+        --conf spark.executor.memory=14G
         --conf spark.executor.cores=4
         --conf spark.cores.max=4
         --conf spark.driver.maxResultSize=3g
@@ -130,25 +131,25 @@ services:
         --conf spark.locality.wait=0
         --conf spark.master=spark://spark-master:7077
 
-  proxy-service:
-    build:
-      context: ./proxy-service
-      dockerfile: Dockerfile
-    container_name: proxy-service
-    ports:
-      - "2080:2080"
-      - "15002:443"
-    volumes:
-      - ./proxy-service/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./proxy-service/certs:/etc/nginx/certs:ro
-    networks:
-      - spark-network
-    depends_on:
-      - spark-master
-      - spark-worker
-      - spark-connect-server
-      - spark-connect-server-cpu
-    restart: unless-stopped
+  # proxy-service:
+  #   build:
+  #     context: ./proxy-service
+  #     dockerfile: Dockerfile
+  #   container_name: proxy-service
+  #   ports:
+  #     - "2080:2080"
+  #     - "15002:443"
+  #   volumes:
+  #     - ./proxy-service/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./proxy-service/certs:/etc/nginx/certs:ro
+  #   networks:
+  #     - spark-network
+  #   depends_on:
+  #     - spark-master
+  #     - spark-worker
+  #     - spark-connect-server
+  #     - spark-connect-server-cpu
+  #   restart: unless-stopped
 
   grpc-proxy:
     build:
@@ -156,7 +157,7 @@ services:
       dockerfile: Dockerfile
     container_name:  grpc-proxy
     ports:
-      - "15003:15002"
+      - "15002:15002"
     networks:
       - spark-network
     depends_on:

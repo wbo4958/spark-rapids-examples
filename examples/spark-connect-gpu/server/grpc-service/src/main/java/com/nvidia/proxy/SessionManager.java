@@ -14,7 +14,7 @@ import java.util.logging.Logger;
  * 5. Client stores to server session id.
  */
 public class SessionManager {
-    private static final Logger LOG = Logger.getLogger(SessionManager.class.getName());
+    private static final Logger LOG = Logger.getLogger("SessionManager");
 
     /**
      * Maintains a mapping between client-side session IDs and server-side session IDs for Spark Connect.

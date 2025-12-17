@@ -1,6 +1,7 @@
 package com.nvidia.proxy.plugins;
 
 import com.nvidia.proxy.ConnectPlugin;
+import com.nvidia.proxy.beans.PluginSuggestion;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -12,57 +13,61 @@ import java.util.logging.Logger;
 /**
  * Simple AetherPlugin that demonstrates how routing decisions can be made.
  * The logic is intentionally lightweight:
- * - If the user id starts with "gpu-" the request is directed to the GPU cluster.
- * - Otherwise it defaults to the CPU cluster.
+ * - Routing decisions are made when a session is first released
+ * - Subsequent calls return the cached routing and configuration
  * - Additional Spark configuration defaults are returned to keep the example usable.
  */
 public class AetherPlugin implements ConnectPlugin {
 
-    private static final Logger LOG = Logger.getLogger(AetherPlugin.class.getName());
+    private static final Logger LOG = Logger.getLogger("AetherPlugin");
 
-    private Map<String, Map<String, String>> uniqIdToConfigs = new HashMap<>();
+    private Map<String, PluginSuggestion> jobIdToSuggestions = new HashMap<>();
 
     @Override
-    public Map<String, String> suggestConfigurations(String uniqId, String userId, String sessionId) {
-        Map<String, String> configs = uniqIdToConfigs.getOrDefault(uniqId, Collections.emptyMap());
+    public PluginSuggestion suggestConfigurations(String userId, String sessionId, String jobId) {
+        PluginSuggestion suggestion = jobIdToSuggestions.getOrDefault(jobId, PluginSuggestion.empty());
 
         LOG.log(Level.INFO, String.format(
-                "AetherPlugin suggestions for uniqId=%s, userId=%s, sessionId=%s -> %s",
-                Objects.toString(uniqId, "unknown"),
+                "AetherPlugin suggestions for userId=%s, sessionId=%s, jobId=%s -> clusterType=%s, sparkConfigs=%s",
                 Objects.toString(userId, "unknown"),
                 Objects.toString(sessionId, "unknown"),
-                configs));
+                Objects.toString(jobId, "unknown"),
+                Objects.toString(suggestion.clusterType(), "default"),
+                suggestion.sparkConfigurations()));
 
-        return configs;
+        return suggestion;
     }
 
     @Override
-    public void releaseSession(String uniqId, String userId, String sessionId) {
+    public void releaseSession(String jobId, String userId, String sessionId) {
         LOG.log(Level.INFO, () -> String.format(
-                "Releasing session for uniqId=%s, userId=%s, sessionId=%s",
-                Objects.toString(uniqId, "unknown"),
+                "Releasing session for jobId=%s, userId=%s, sessionId=%s",
+                Objects.toString(jobId, "unknown"),
                 Objects.toString(userId, "unknown"),
                 Objects.toString(sessionId, "unknown")));
 
-        // Calculate configs for this uniqId anymore.
-        if (!uniqIdToConfigs.containsKey(uniqId)) {
-            // TODO: calcuate the configs for this uniqId via Aether.
-            var configs = new HashMap<String, String>();
-            if (uniqId.equals("hello-gpu")) {
-                configs.put("cluster.type", "gpu");
-                configs.put("spark.rapids.hello.cluster.type", "gpu-cluster");
-                configs.put("spark.rapids.hello.cluster.name", "spark-connect-gpu-cluster");
-                configs.put("spark.rapids.hello.uniqId", "hello-gpu");
-            } else if (uniqId.equals("hello-cpu")) {
-                configs.put("cluster.type", "cpu");
-                configs.put("spark.rapids.hello.cluster.type", "cpu-cluster");
-                configs.put("spark.rapids.hello.cluster.name", "spark-connect-cpu-cluster");
-                configs.put("spark.rapids.hello.uniqId", "hello-cpu");
+        // Calculate suggestions for this jobId if not already cached.
+        if (!jobIdToSuggestions.containsKey(jobId)) {
+            // TODO: Calculate the suggestions for this jobId via Aether.
+            String clusterType;
+            Map<String, String> sparkConfigs = new HashMap<>();
+            
+            if (jobId.equals("hello-gpu")) {
+                clusterType = "gpu";
+                sparkConfigs.put("spark.rapids.hello.cluster.type", "gpu-cluster");
+                sparkConfigs.put("spark.rapids.hello.cluster.name", "spark-connect-gpu-cluster");
+                sparkConfigs.put("spark.rapids.hello.jobId", "hello-gpu");
+            } else if (jobId.equals("hello-cpu")) {
+                clusterType = "cpu";
+                sparkConfigs.put("spark.rapids.hello.cluster.type", "cpu-cluster");
+                sparkConfigs.put("spark.rapids.hello.cluster.name", "spark-connect-cpu-cluster");
+                sparkConfigs.put("spark.rapids.hello.jobId", "hello-cpu");
             } else {
-                configs.put("cluster.type", "cpu");
-                configs.put("spark.rapids.hello.uniqId", uniqId);
+                clusterType = "cpu";
+                sparkConfigs.put("spark.rapids.hello.jobId", jobId);
             }
-            uniqIdToConfigs.put(uniqId, configs);
+            
+            jobIdToSuggestions.put(jobId, new PluginSuggestion(clusterType, sparkConfigs));
         }
     }
 }
