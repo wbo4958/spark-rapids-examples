@@ -35,13 +35,113 @@ public class GrpcGateway {
     private static final Metadata.Key<String> CLUSTER_ID_METADATA_KEY =
             Metadata.Key.of("cluster_id", Metadata.ASCII_STRING_MARSHALLER);
 
+    // Default data directory if DATA_DIR environment variable is not set
+    private static final String DEFAULT_DATA_DIR = "/data";
+
     private final SessionManager sessionManager;
     private final Router router;
+    private final String eventLogBaseDir;
 
     public GrpcGateway() {
         sessionManager = new SessionManager();
         router = new Router();
         LOG.setLevel(Level.FINE);
+
+        // Read DATA_DIR from environment variable, default to /data
+        String dataDir = System.getenv("DATA_DIR");
+        if (dataDir == null || dataDir.trim().isEmpty()) {
+            dataDir = DEFAULT_DATA_DIR;
+        }
+        // Set base event log directory path (app ID will be appended per session)
+        this.eventLogBaseDir = dataDir + "/spark-events";
+        LOG.info("Event log base directory configured: " + eventLogBaseDir);
+    }
+
+    /**
+     * Fetches the Spark application ID from the upstream Spark Connect server.
+     * Uses executeUnaryCall pattern to properly maintain session mappings.
+     *
+     * @param ctx the request context containing service stub and session info
+     * @return the application ID, or empty string if not available
+     */
+    private String getSparkAppId(RequestContext ctx) {
+        try {
+            // Build a config request to get spark.app.id
+            var configReq = ConfigRequest.newBuilder()
+                    .setSessionId(ctx.sessionId())
+                    .setUserContext(UserContext.newBuilder().setUserId(ctx.userId()).build())
+                    .setOperation(
+                            ConfigRequest.Operation.newBuilder()
+                                    .setGet(
+                                            ConfigRequest.Get.newBuilder()
+                                                    .addKeys("spark.app.id")
+                                                    .build()
+                                    ).build()
+                    ).build();
+
+            // Set clientObservedServerSideSessionId if available
+            var builder = configReq.toBuilder();
+            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
+                    builder::setClientObservedServerSideSessionId,
+                    builder::clearClientObservedServerSideSessionId
+            );
+            final var finalRequest = builder.build();
+
+            // Use a holder to capture the result from the observer
+            final String[] appIdHolder = {""};
+
+            // Create an observer to capture the response
+            var observer = new StreamObserver<ConfigResponse>() {
+                @Override
+                public void onNext(ConfigResponse response) {
+                    // Extract spark.app.id from response
+                    for (KeyValue kv : response.getPairsList()) {
+                        if ("spark.app.id".equals(kv.getKey())) {
+                            appIdHolder[0] = kv.getValue();
+                            LOG.fine("Retrieved spark.app.id: " + appIdHolder[0]);
+                            break;
+                        }
+                    }
+                }
+
+                @Override
+                public void onError(Throwable throwable) {
+                    LOG.log(Level.WARNING, "Failed to retrieve spark.app.id", throwable);
+                }
+
+                @Override
+                public void onCompleted() {
+                }
+            };
+
+            // Use executeUnaryCall to maintain session mappings
+            executeUnaryCall(ctx, "GetSparkAppId",
+                    () -> ctx.service().config(finalRequest),
+                    ConfigResponse::getServerSideSessionId,
+                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+                    observer);
+
+            if (appIdHolder[0].isEmpty()) {
+                LOG.warning("spark.app.id not found in config response");
+            }
+            return appIdHolder[0];
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to retrieve spark.app.id", e);
+            return "";
+        }
+    }
+
+    /**
+     * Generates the full event log directory path for a specific Spark application.
+     *
+     * @param appId the Spark application ID
+     * @return the full event log directory path (e.g., /data/spark-events/eventlog_v2_app-123)
+     */
+    private String getEventLogDir(String appId) {
+        if (appId == null || appId.trim().isEmpty()) {
+            return eventLogBaseDir;
+        }
+        return eventLogBaseDir + "/eventlog_v2_" + appId;
     }
 
     /**
@@ -341,7 +441,13 @@ public class GrpcGateway {
         @Override
         public void releaseSession(ReleaseSessionRequest request, StreamObserver<ReleaseSessionResponse> responseObserver) {
             var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
-            router.releaseSession(ctx.jobId(), ctx.userId(), ctx.sessionId());
+
+            // Fetch spark.app.id and construct the full event log directory path
+            String appId = getSparkAppId(ctx);
+            String eventLogDir = getEventLogDir(appId);
+            LOG.info(String.format("[ReleaseSession] appId=%s, eventLogDir=%s", appId, eventLogDir));
+
+            router.releaseSession(ctx.jobId(), ctx.userId(), ctx.sessionId(), eventLogDir);
 
             executeUnaryCall(ctx, "ReleaseSession",
                     () -> ctx.service().releaseSession(request),

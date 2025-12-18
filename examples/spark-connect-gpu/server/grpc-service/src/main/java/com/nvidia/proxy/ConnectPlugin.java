@@ -28,9 +28,10 @@ public interface ConnectPlugin {
      * Releases the session associated with the given identifiers.
      * Called when a session is terminated or no longer needed.
      *
-     * @param jobId    the job id of the Spark applications.
-     * @param userId    user id
-     * @param sessionId the spark session id
+     * @param jobId       the job id of the Spark applications.
+     * @param userId      user id
+     * @param sessionId   the spark session id
+     * @param eventLogDir the directory path where Spark event logs are stored
      */
-    void releaseSession(String jobId, String userId, String sessionId);
+    void releaseSession(String jobId, String userId, String sessionId, String eventLogDir);
 }

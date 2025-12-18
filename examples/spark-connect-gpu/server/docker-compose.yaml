@@ -91,7 +91,7 @@ services:
       /opt/spark/sbin/start-connect-server.sh
         --name="GPU Cluster"
         --driver-memory=24G
-        --conf spark.executor.memory=14G
+        --conf spark.executor.memory=28G
         --conf spark.executor.cores=8
         --conf spark.cores.max=8
 
@@ -120,13 +120,12 @@ services:
       /opt/spark/sbin/start-connect-server.sh
         --name="CPU Cluster"
         --driver-memory=5G
-        --conf spark.executor.memory=14G
+        --conf spark.executor.memory=28G
         --conf spark.executor.cores=4
         --conf spark.cores.max=4
         --conf spark.driver.maxResultSize=3g
         --conf spark.eventLog.dir=/data/spark-events
         --conf spark.eventLog.enabled=true
-        --conf spark.eventLog.compress=true
         --conf spark.local.dir=/opt/spark/work
         --conf spark.locality.wait=0
         --conf spark.master=spark://spark-master:7077
@@ -152,14 +151,15 @@ services:
   #   restart: unless-stopped
 
   grpc-proxy:
+    <<: *spark-common
     build:
       context: ./grpc-service
       dockerfile: Dockerfile
     container_name:  grpc-proxy
+    environment:
+      DATA_DIR: /data
     ports:
       - "15002:15002"
-    networks:
-      - spark-network
     depends_on:
       - spark-master
       - spark-worker

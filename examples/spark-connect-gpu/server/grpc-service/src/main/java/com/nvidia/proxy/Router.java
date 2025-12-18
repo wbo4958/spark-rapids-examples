@@ -263,16 +263,17 @@ public class Router implements Closeable {
      * If a plugin is present, delegates the release logic to the plugin.
      * Otherwise, falls back to the in-memory CpuFirstThenGpu policy.
      *
-     * @param jobId    the unique identifier for the Spark application
-     * @param userId    the user identifier
-     * @param sessionId the Spark session identifier
+     * @param jobId       the unique identifier for the Spark application
+     * @param userId      the user identifier
+     * @param sessionId   the Spark session identifier
+     * @param eventLogDir the directory path where Spark event logs are stored
      */
-    public void releaseSession(String jobId, String userId, String sessionId) {
-        LOG.info(String.format("[Router] releaseSession: jobId=%s, userId=%s, sessionId=%s",
-                jobId, userId, sessionId));
+    public void releaseSession(String jobId, String userId, String sessionId, String eventLogDir) {
+        LOG.info(String.format("[Router] releaseSession: jobId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
+                jobId, userId, sessionId, eventLogDir));
 
         if (plugin.isPresent()) {
-            plugin.get().releaseSession(jobId, userId, sessionId);
+            plugin.get().releaseSession(jobId, userId, sessionId, eventLogDir);
         } else {
             inMemoryPolicy.releaseSession(jobId, sessionId);
         }

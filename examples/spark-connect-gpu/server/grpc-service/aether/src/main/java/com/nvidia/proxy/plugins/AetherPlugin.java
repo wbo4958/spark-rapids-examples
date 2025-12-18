@@ -39,12 +39,13 @@ public class AetherPlugin implements ConnectPlugin {
     }
 
     @Override
-    public void releaseSession(String jobId, String userId, String sessionId) {
+    public void releaseSession(String jobId, String userId, String sessionId, String eventLogDir) {
         LOG.log(Level.INFO, () -> String.format(
-                "Releasing session for jobId=%s, userId=%s, sessionId=%s",
+                "Releasing session for jobId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
                 Objects.toString(jobId, "unknown"),
                 Objects.toString(userId, "unknown"),
-                Objects.toString(sessionId, "unknown")));
+                Objects.toString(sessionId, "unknown"),
+                Objects.toString(eventLogDir, "unknown")));
 
         // Calculate suggestions for this jobId if not already cached.
         if (!jobIdToSuggestions.containsKey(jobId)) {
