@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Handler;
@@ -41,6 +42,7 @@ public class GrpcGateway {
     private final SessionManager sessionManager;
     private final Router router;
     private final String eventLogBaseDir;
+    private final Map<SparkConnectServiceGrpc.SparkConnectServiceBlockingStub, ServiceInfo> serviceInfos = new ConcurrentHashMap<>();
 
     public GrpcGateway() {
         sessionManager = new SessionManager();
@@ -55,6 +57,20 @@ public class GrpcGateway {
         // Set base event log directory path (app ID will be appended per session)
         this.eventLogBaseDir = dataDir + "/spark-events";
         LOG.info("Event log base directory configured: " + eventLogBaseDir);
+
+        // Set up session expiration callback to trigger releaseSession
+        sessionManager.setOnSessionExpiredCallback(info -> {
+            String jobId = info.getJobId();
+            String userId = info.getUserId();
+            String sessionId = info.getSessionId();
+            String eventLogDir = info.getEventLogDir();
+
+            LOG.info(String.format("[GrpcGateway] Session expired, releasing: jobId=%s, userId=%s, sessionId=%s",
+                    jobId, userId, sessionId));
+
+            // Trigger releaseSession on the router
+            router.releaseSession(jobId, userId, sessionId, eventLogDir);
+        });
     }
 
     /**
@@ -65,48 +81,61 @@ public class GrpcGateway {
      * @return the application ID, or empty string if not available
      */
     private String getSparkAppId(RequestContext ctx) {
+        var configs = getSparkConfigs(ctx, "spark.app.id");
+        return configs.getOrDefault("spark.app.id", "");
+    }
+
+    /**
+     * Fetches multiple Spark configurations from the upstream Spark Connect server.
+     * Uses executeUnaryCall pattern to properly maintain session mappings.
+     *
+     * @param ctx the request context containing service stub and session info
+     * @param keys the configuration keys to retrieve
+     * @return a map of configuration key-value pairs
+     */
+    private Map<String, String> getSparkConfigs(RequestContext ctx, String... keys) {
+        Map<String, String> configMap = new ConcurrentHashMap<>();
+        
+        if (keys == null || keys.length == 0) {
+            LOG.warning("No configuration keys provided to getSparkConfigs");
+            return configMap;
+        }
+
         try {
-            // Build a config request to get spark.app.id
-            var configReq = ConfigRequest.newBuilder()
+            // Build a config request to get the specified keys
+            var configReqBuilder = ConfigRequest.newBuilder()
                     .setSessionId(ctx.sessionId())
                     .setUserContext(UserContext.newBuilder().setUserId(ctx.userId()).build())
                     .setOperation(
                             ConfigRequest.Operation.newBuilder()
                                     .setGet(
                                             ConfigRequest.Get.newBuilder()
-                                                    .addKeys("spark.app.id")
+                                                    .addAllKeys(java.util.Arrays.asList(keys))
                                                     .build()
                                     ).build()
-                    ).build();
+                    );
 
             // Set clientObservedServerSideSessionId if available
-            var builder = configReq.toBuilder();
             ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
+                    configReqBuilder::setClientObservedServerSideSessionId,
+                    configReqBuilder::clearClientObservedServerSideSessionId
             );
-            final var finalRequest = builder.build();
-
-            // Use a holder to capture the result from the observer
-            final String[] appIdHolder = {""};
+            final var finalRequest = configReqBuilder.build();
 
             // Create an observer to capture the response
             var observer = new StreamObserver<ConfigResponse>() {
                 @Override
                 public void onNext(ConfigResponse response) {
-                    // Extract spark.app.id from response
+                    // Extract all key-value pairs from response
                     for (KeyValue kv : response.getPairsList()) {
-                        if ("spark.app.id".equals(kv.getKey())) {
-                            appIdHolder[0] = kv.getValue();
-                            LOG.fine("Retrieved spark.app.id: " + appIdHolder[0]);
-                            break;
-                        }
+                        configMap.put(kv.getKey(), kv.getValue());
+                        LOG.fine(String.format("Retrieved config: %s = %s", kv.getKey(), kv.getValue()));
                     }
                 }
 
                 @Override
                 public void onError(Throwable throwable) {
-                    LOG.log(Level.WARNING, "Failed to retrieve spark.app.id", throwable);
+                    LOG.log(Level.WARNING, "Failed to retrieve configurations: " + java.util.Arrays.toString(keys), throwable);
                 }
 
                 @Override
@@ -115,33 +144,49 @@ public class GrpcGateway {
             };
 
             // Use executeUnaryCall to maintain session mappings
-            executeUnaryCall(ctx, "GetSparkAppId",
+            executeUnaryCall(ctx, "GetSparkConfigs",
                     () -> ctx.service().config(finalRequest),
                     ConfigResponse::getServerSideSessionId,
                     (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
                     observer);
 
-            if (appIdHolder[0].isEmpty()) {
-                LOG.warning("spark.app.id not found in config response");
+            // Log any missing configs
+            for (String key : keys) {
+                if (!configMap.containsKey(key)) {
+                    LOG.warning(String.format("Configuration key not found in response: %s", key));
+                }
             }
-            return appIdHolder[0];
+            
+            return configMap;
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to retrieve spark.app.id", e);
-            return "";
+            LOG.log(Level.WARNING, "Failed to retrieve configurations: " + java.util.Arrays.toString(keys), e);
+            return configMap;
         }
     }
+
+    private record ServiceInfo(
+            String appId,
+            String eventLog,
+            long sessionTimeout
+    ) {}
 
     /**
      * Generates the full event log directory path for a specific Spark application.
      *
-     * @param appId the Spark application ID
      * @return the full event log directory path (e.g., /data/spark-events/eventlog_v2_app-123)
      */
-    private String getEventLogDir(String appId) {
-        if (appId == null || appId.trim().isEmpty()) {
-            return eventLogBaseDir;
+    private synchronized ServiceInfo getServiceInfo(RequestContext ctx) {
+        if (!serviceInfos.containsKey(ctx.service())) {
+            var configs = getSparkConfigs(ctx, "spark.app.id", "spark.connect.session.manager.defaultSessionTimeout");
+            var appId = configs.getOrDefault("spark.app.id", "");
+            var eventLog = eventLogBaseDir + "/eventlog_v2_" + appId;
+            var sessionTimeoutStr = configs.getOrDefault("spark.connect.session.manager.defaultSessionTimeout", "60m");
+            var timeout = Utils.timeStringAsMs(sessionTimeoutStr);
+            LOG.info(String.format("[getServiceInfo] Determined appId: %s, eventLog: %s, sessionTimeoutStr: %s(%ds) for service: %s",
+                    appId, eventLog, sessionTimeoutStr, timeout, ctx.service()));
+            serviceInfos.put(ctx.service(), new ServiceInfo(appId, eventLog, timeout));
         }
-        return eventLogBaseDir + "/eventlog_v2_" + appId;
+        return serviceInfos.get(ctx.service());
     }
 
     /**
@@ -211,8 +256,12 @@ public class GrpcGateway {
         // Step 4: Look up previously observed server-side session ID for session consistency
         Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(sessionId, service);
 
-        return new RequestContext(userId, sessionId, clusterId, jobId, service,
+        var context = new RequestContext(userId, sessionId, clusterId, jobId, service,
                 clientObservedServerSideSessionId, determination.configurations());
+        var serviceInfo = getServiceInfo(context);
+        // Step 5: Track session for expiration management (updates access time if exists)
+        sessionManager.trackSession(jobId, userId, sessionId, serviceInfo.eventLog(), serviceInfo.sessionTimeout());
+        return context;
     }
 
     /**
@@ -349,7 +398,7 @@ public class GrpcGateway {
 
                 // Update response with consistent session ID and send to client
                 response = response.toBuilder().setServerSideSessionId(consistentSessionId).build();
-                if (LOG.isLoggable(Level.FINE)) {
+                if (responseCount == 1 && LOG.isLoggable(Level.FINE)) {
                     LOG.fine(String.format("[%s] Streaming response #%d: sessionId=%s",
                             methodName, responseCount, ctx.sessionId()));
                 }
@@ -442,10 +491,12 @@ public class GrpcGateway {
         public void releaseSession(ReleaseSessionRequest request, StreamObserver<ReleaseSessionResponse> responseObserver) {
             var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            // Fetch spark.app.id and construct the full event log directory path
-            String appId = getSparkAppId(ctx);
-            String eventLogDir = getEventLogDir(appId);
-            LOG.info(String.format("[ReleaseSession] appId=%s, eventLogDir=%s", appId, eventLogDir));
+            var serviceInfo = getServiceInfo(ctx);
+            String eventLogDir = serviceInfo.eventLog();
+            LOG.info(String.format("[ReleaseSession] sessionId=%s, eventLogDir=%s", ctx.sessionId(), eventLogDir));
+
+            // Remove session from tracking (explicit release, no need to wait for expiration)
+            sessionManager.removeSession(ctx.sessionId());
 
             router.releaseSession(ctx.jobId(), ctx.userId(), ctx.sessionId(), eventLogDir);
 
