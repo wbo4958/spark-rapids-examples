@@ -280,11 +280,13 @@ public class SessionManager implements Closeable {
     }
 
     /**
-     * Get the server side session id according to the client session id.
+     * Retrieves the server-side session ID associated with the given client-side session ID.
+     * If this is the first time this mapping is seen, stores the provided server-side session ID.
+     * Always updates session access time.
      *
-     * @param clientSideSessionId the client side session id
-     * @param serverSideSessionId the server side session id.
-     * @return the server side session id stored for the first response.
+     * @param clientSideSessionId the client-side session ID
+     * @param serverSideSessionId the server-side session ID (as reported by the upstream server)
+     * @return the stored (first-mapped) server-side session ID for the client session
      */
     public String getServerSideSessionId(String clientSideSessionId,
                                          String serverSideSessionId) {

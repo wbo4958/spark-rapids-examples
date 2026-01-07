@@ -42,7 +42,30 @@ public class GrpcGateway {
     private final SessionManager sessionManager;
     private final Router router;
     private final String eventLogBaseDir;
+    /**
+     * Cache of service-specific metadata for connected Spark Connect servers.
+     *
+     * Maps each SparkConnectServiceBlockingStub (representing a unique Spark Connect server connection)
+     * to its associated ServiceInfo object, which may include properties such as event log directory,
+     * session timeout, and other configuration or identification details required across requests.
+     *
+     * This allows for fast lookups and avoids the need to re-query service metadata on each request.
+     * It is updated as new services are connected or new sessions are tracked.
+     */
     private final Map<SparkConnectServiceGrpc.SparkConnectServiceBlockingStub, ServiceInfo> serviceInfos = new ConcurrentHashMap<>();
+    
+    /**
+     * Cache of RequestContext objects indexed by session ID.
+     *
+     * Maps session IDs to their corresponding RequestContext objects to avoid recreating
+     * the context for each request from the same session. This improves performance by
+     * reusing routing information, service stubs, and other metadata that remain constant
+     * throughout a session's lifetime.
+     *
+     * The cache is thread-safe and automatically managed - entries are created on first
+     * access and can be invalidated when sessions are released.
+     */
+    private final Map<String, RequestContext> requestContextCache = new ConcurrentHashMap<>();
 
     public GrpcGateway() {
         sessionManager = new SessionManager();
@@ -64,6 +87,12 @@ public class GrpcGateway {
             String userId = info.getUserId();
             String sessionId = info.getSessionId();
             String eventLogDir = info.getEventLogDir();
+
+            // Session timeout, but the client side is not aware of this, so the session is still
+            // available from the client point view. We need to route to the right connect server
+            // to raise the exception.
+            // TODO, create a set to store the expired sessions, and throw exception when creating request context.
+            // requestContextCache.remove(sessionId);
 
             LOG.info(String.format("[GrpcGateway] Session expired, releasing: jobId=%s, userId=%s, sessionId=%s",
                     jobId, userId, sessionId));
@@ -171,9 +200,16 @@ public class GrpcGateway {
     ) {}
 
     /**
-     * Generates the full event log directory path for a specific Spark application.
+     * Returns (and caches) information about the upstream Spark Connect service associated with the given request context.
      *
-     * @return the full event log directory path (e.g., /data/spark-events/eventlog_v2_app-123)
+     * Computes the Spark application ID, event log directory, and session timeout for this service,
+     * then stores them in a cache for future use. The information is retrieved from the Spark configuration
+     * of the remote service using getSparkConfigs().
+     *
+     * This method is thread-safe; only one thread will compute and cache ServiceInfo for a given service at a time.
+     *
+     * @param ctx the RequestContext containing the upstream service stub and headers/identifiers
+     * @return ServiceInfo containing appId, event log path, and session timeout for the service
      */
     private synchronized ServiceInfo getServiceInfo(RequestContext ctx) {
         if (!serviceInfos.containsKey(ctx.service())) {
@@ -220,14 +256,17 @@ public class GrpcGateway {
             String jobId,
             SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service,
             Optional<String> clientObservedServerSideSessionId,
-            Map<String, String> suggestedConfs
+            Map<String, String> suggestedConfs,
+            boolean confIsSet
     ) {
     }
 
     /**
-     * Creates a RequestContext from common request fields.
+     * Creates or retrieves a cached RequestContext from common request fields.
      *
-     * <p>This method performs the following steps to build the context:</p>
+     * <p>This method first checks if a cached RequestContext exists for the given session ID.
+     * If found, it updates the clientObservedServerSideSessionId and returns the cached context.
+     * Otherwise, it performs the following steps to build a new context:</p>
      * <ol>
      *   <li>Extracts the unique ID from the gRPC context (set by the auth interceptor)</li>
      *   <li>Extracts the cluster ID from the gRPC context (set by the auth interceptor)</li>
@@ -235,6 +274,7 @@ public class GrpcGateway {
      *       based on jobId, userId, sessionId, and clusterId</li>
      *   <li>Looks up any previously observed server-side session ID for this client session,
      *       which will be used to maintain session consistency with the upstream server</li>
+     *   <li>Caches the created context for future requests</li>
      * </ol>
      *
      * @param sessionId The client-side session ID from the incoming gRPC request
@@ -243,6 +283,40 @@ public class GrpcGateway {
      * to route and process the request
      */
     private RequestContext createRequestContext(String sessionId, String userId) {
+        // Check if we have a cached context for this session
+        RequestContext cachedContext = requestContextCache.get(sessionId);
+
+        if (cachedContext != null && cachedContext.clientObservedServerSideSessionId.isEmpty()) {
+            // Update the clientObservedServerSideSessionId as it may have changed
+            Optional<String> clientObservedServerSideSessionId = 
+                    sessionManager.getServerSideSessionId(sessionId, cachedContext.service());
+            
+            // Create an updated context with the latest clientObservedServerSideSessionId
+            var updatedContext = new RequestContext(
+                    cachedContext.userId(),
+                    cachedContext.sessionId(),
+                    cachedContext.clusterId(),
+                    cachedContext.jobId(),
+                    cachedContext.service(),
+                    clientObservedServerSideSessionId,
+                    cachedContext.suggestedConfs(),
+                    cachedContext.confIsSet());
+            
+            // Update the cache with the refreshed context
+            requestContextCache.put(sessionId, updatedContext);
+            
+            // Track session for expiration management (updates access time if exists)
+            var serviceInfo = getServiceInfo(updatedContext);
+            sessionManager.trackSession(cachedContext.jobId(), userId, sessionId, 
+                    serviceInfo.eventLog(), serviceInfo.sessionTimeout());
+            
+            if (LOG.isLoggable(Level.FINE)) {
+                LOG.fine(String.format("[createRequestContext] Using cached context for sessionId=%s", sessionId));
+            }
+            return updatedContext;
+        }
+        
+        // No cached context found, create a new one
         // Step 1: Extract unique ID from gRPC context (set by auth interceptor)
         String jobId = JOB_ID_CONTEXT_KEY.get();
 
@@ -257,10 +331,18 @@ public class GrpcGateway {
         Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(sessionId, service);
 
         var context = new RequestContext(userId, sessionId, clusterId, jobId, service,
-                clientObservedServerSideSessionId, determination.configurations());
+                clientObservedServerSideSessionId, determination.configurations(), false);
         var serviceInfo = getServiceInfo(context);
         // Step 5: Track session for expiration management (updates access time if exists)
         sessionManager.trackSession(jobId, userId, sessionId, serviceInfo.eventLog(), serviceInfo.sessionTimeout());
+        
+        // Step 6: Cache the context for future requests
+        requestContextCache.put(sessionId, context);
+        
+        if (LOG.isLoggable(Level.FINE)) {
+            LOG.fine(String.format("[createRequestContext] Created new context for sessionId=%s", sessionId));
+        }
+        
         return context;
     }
 
@@ -416,9 +498,10 @@ public class GrpcGateway {
 
     private class ProxyService extends SparkConnectServiceGrpc.SparkConnectServiceImplBase {
 
+        // TODO, set the Spark Configurations only once for a session
         private void setSuggestedConfigurations(RequestContext ctx) {
             // Ensure there's at least 1 recommended spark configuration.
-            if (!ctx.suggestedConfs().isEmpty()) {
+            if (!ctx.suggestedConfs().isEmpty() && !ctx.confIsSet()) {
                 // Convert Map<String, String> to List<KeyValue>
                 var keyValueList = ctx.suggestedConfs().entrySet().stream()
                         .map(e -> KeyValue.newBuilder().setKey(e.getKey()).setValue(e.getValue()).build())
@@ -465,6 +548,20 @@ public class GrpcGateway {
                         ConfigResponse::getServerSideSessionId,
                         (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
                         observer);
+
+                // Create an updated context with the latest true confIsSet
+                var updatedContext = new RequestContext(
+                        ctx.userId(),
+                        ctx.sessionId(),
+                        ctx.clusterId(),
+                        ctx.jobId(),
+                        ctx.service(),
+                        ctx.clientObservedServerSideSessionId(),
+                        ctx.suggestedConfs(),
+                        true);
+
+                // Update the cache with the refreshed context
+                requestContextCache.put(ctx.sessionId(), updatedContext);
             }
         }
 
@@ -497,6 +594,12 @@ public class GrpcGateway {
 
             // Remove session from tracking (explicit release, no need to wait for expiration)
             sessionManager.removeSession(ctx.sessionId());
+            
+            // Remove the cached RequestContext for this session
+            requestContextCache.remove(ctx.sessionId());
+            if (LOG.isLoggable(Level.FINE)) {
+                LOG.fine(String.format("[ReleaseSession] Removed cached context for sessionId=%s", ctx.sessionId()));
+            }
 
             router.releaseSession(ctx.jobId(), ctx.userId(), ctx.sessionId(), eventLogDir);
 
@@ -671,7 +774,7 @@ public class GrpcGateway {
     }
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        Logger proxyLogger = Logger.getLogger("com.nvidia.proxy");
+        Logger proxyLogger = Logger.getLogger("GRPCGateway");
         proxyLogger.setLevel(Level.FINE);
 
         // Also set console handler to show FINE level
