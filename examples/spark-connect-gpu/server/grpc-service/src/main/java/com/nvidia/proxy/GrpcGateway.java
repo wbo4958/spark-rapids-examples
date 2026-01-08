@@ -88,11 +88,17 @@ public class GrpcGateway {
             String sessionId = info.getSessionId();
             String eventLogDir = info.getEventLogDir();
 
-            // Session timeout, but the client side is not aware of this, so the session is still
-            // available from the client point view. We need to route to the right connect server
-            // to raise the exception.
-            // TODO, create a set to store the expired sessions, and throw exception when creating request context.
-            // requestContextCache.remove(sessionId);
+            var cachedContext = requestContextCache.get(sessionId);
+            var updatedContext = new RequestContext(
+                    cachedContext.userId(),
+                    cachedContext.sessionId(),
+                    cachedContext.clusterId(),
+                    cachedContext.jobId(),
+                    cachedContext.service(),
+                    cachedContext.clientObservedServerSideSessionId(),
+                    null, // Do not maintain this value.
+                    true);
+            requestContextCache.put(cachedContext.sessionId(), updatedContext);
 
             LOG.info(String.format("[GrpcGateway] Session expired, releasing: jobId=%s, userId=%s, sessionId=%s",
                     jobId, userId, sessionId));
@@ -100,18 +106,6 @@ public class GrpcGateway {
             // Trigger releaseSession on the router
             router.releaseSession(jobId, userId, sessionId, eventLogDir);
         });
-    }
-
-    /**
-     * Fetches the Spark application ID from the upstream Spark Connect server.
-     * Uses executeUnaryCall pattern to properly maintain session mappings.
-     *
-     * @param ctx the request context containing service stub and session info
-     * @return the application ID, or empty string if not available
-     */
-    private String getSparkAppId(RequestContext ctx) {
-        var configs = getSparkConfigs(ctx, "spark.app.id");
-        return configs.getOrDefault("spark.app.id", "");
     }
 
     /**
@@ -501,7 +495,7 @@ public class GrpcGateway {
         // TODO, set the Spark Configurations only once for a session
         private void setSuggestedConfigurations(RequestContext ctx) {
             // Ensure there's at least 1 recommended spark configuration.
-            if (!ctx.suggestedConfs().isEmpty() && !ctx.confIsSet()) {
+            if (!ctx.confIsSet() && !ctx.suggestedConfs().isEmpty()) {
                 // Convert Map<String, String> to List<KeyValue>
                 var keyValueList = ctx.suggestedConfs().entrySet().stream()
                         .map(e -> KeyValue.newBuilder().setKey(e.getKey()).setValue(e.getValue()).build())
