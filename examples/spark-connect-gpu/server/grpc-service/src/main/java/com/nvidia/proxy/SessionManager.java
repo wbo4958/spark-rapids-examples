@@ -33,6 +33,39 @@ public class SessionManager implements Closeable {
     // Default maintenance interval: 30 seconds
     private static final long DEFAULT_MAINTENANCE_INTERVAL_MS = 30 * 1000L;
 
+    public static class JobInfo {
+        private final String jobId;
+        private final String userId;
+        private final Set<String> sessionIds;
+        private final String eventLogDir;
+
+        JobInfo(String jobId, String userId, String eventLogDir) {
+            this.jobId = jobId;
+            this.userId = userId;
+            this.eventLogDir = eventLogDir;
+            this.sessionIds = new HashSet<>();
+        }
+
+        public void addSessions(Set<String> sessions) {
+            this.sessionIds.addAll(sessions);
+        }
+
+        public String getJobId() {
+            return jobId;
+        }
+
+        public String getUserId() {
+            return userId;
+        }
+
+        public Set<String> getSessionIds() {
+            return sessionIds;
+        }
+
+        public String getEventLogDir() {
+            return eventLogDir;
+        }
+    }
     /**
      * Session metadata containing tracking information.
      * Public to allow external access in callbacks.
@@ -101,8 +134,13 @@ public class SessionManager implements Closeable {
     // Map jobId to set of sessionIds for tracking when all sessions expire
     private final Map<String, Set<String>> jobIdToSessionIds = new ConcurrentHashMap<>();
 
+    // Map jobId to set of all sessionIds for tracking when all sessions expire
+    private final Map<String, Set<String>> jobIdToAllSessionIds = new ConcurrentHashMap<>();
+
     // Callback to trigger when all sessions for a job expire
     private Consumer<SessionInfo> onSessionExpiredCallback;
+
+    private Consumer<JobInfo> onJobFinishedCallback;
 
     // Scheduled executor for session maintenance
     private final ScheduledExecutorService scheduler;
@@ -138,6 +176,10 @@ public class SessionManager implements Closeable {
         this.onSessionExpiredCallback = callback;
     }
 
+    public void setOnJobFinishedCallback(Consumer<JobInfo> callback) {
+        this.onJobFinishedCallback = callback;
+    }
+
     /**
      * Register or update a session with its associated job metadata.
      * This should be called when a session is first accessed or on every access to update the timer.
@@ -170,6 +212,9 @@ public class SessionManager implements Closeable {
 
             // Track session under jobId
             jobIdToSessionIds
+                    .computeIfAbsent(jobId, k -> ConcurrentHashMap.newKeySet())
+                    .add(sessionId);
+            jobIdToAllSessionIds
                     .computeIfAbsent(jobId, k -> ConcurrentHashMap.newKeySet())
                     .add(sessionId);
 
@@ -209,6 +254,12 @@ public class SessionManager implements Closeable {
                 sessions.remove(sessionId);
                 if (sessions.isEmpty()) {
                     jobIdToSessionIds.remove(info.jobId);
+                    var jobInfo = new JobInfo(info.jobId, info.userId, info.eventLogDir);
+                    jobInfo.addSessions(jobIdToAllSessionIds.get(info.jobId));
+                    jobIdToAllSessionIds.remove(info.jobId);
+                    if (onJobFinishedCallback != null) {
+                        onJobFinishedCallback.accept(jobInfo);
+                    }
                 }
             }
             // Clean up session ID mappings
@@ -247,24 +298,34 @@ public class SessionManager implements Closeable {
                 sessionInfoMap.remove(expired.sessionId);
                 clientSessionIdToServerSessionIdMap.remove(expired.sessionId);
 
+                // Trigger callback for job completion
+                if (onSessionExpiredCallback != null) {
+                    LOG.info(String.format("[SessionManager] All sessions for job expired, triggering releaseSession: jobId=%s",
+                            expired.jobId));
+                    try {
+                        onSessionExpiredCallback.accept(expired);
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING,
+                                String.format("[SessionManager] Error in session expired callback: jobId=%s", expired.jobId), e);
+                    }
+                }
+
                 Set<String> jobSessions = jobIdToSessionIds.get(expired.jobId);
                 if (jobSessions != null) {
                     jobSessions.remove(expired.sessionId);
-
                     // Check if all sessions for this job have expired
                     if (jobSessions.isEmpty()) {
                         jobIdToSessionIds.remove(expired.jobId);
 
-                        // Trigger callback for job completion
-                        if (onSessionExpiredCallback != null) {
-                            LOG.info(String.format("[SessionManager] All sessions for job expired, triggering releaseSession: jobId=%s",
-                                    expired.jobId));
-                            try {
-                                onSessionExpiredCallback.accept(expired);
-                            } catch (Exception e) {
-                                LOG.log(Level.WARNING,
-                                        String.format("[SessionManager] Error in session expired callback: jobId=%s", expired.jobId), e);
-                            }
+                        if (LOG.isLoggable(Level.INFO)) {
+                            LOG.info(String.format("[SessionManager] All sessions for jobId=%s have expired. Triggering onJobFinishedCallback.", expired.jobId));
+                        }
+
+                        var jobInfo = new JobInfo(expired.jobId, expired.userId, expired.eventLogDir);
+                        jobInfo.addSessions(jobIdToAllSessionIds.get(expired.jobId));
+                        jobIdToAllSessionIds.remove(expired.jobId);
+                        if (onJobFinishedCallback != null) {
+                            onJobFinishedCallback.accept(jobInfo);
                         }
                     }
                 }

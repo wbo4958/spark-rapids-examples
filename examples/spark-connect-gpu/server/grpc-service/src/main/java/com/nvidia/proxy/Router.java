@@ -1,5 +1,6 @@
 package com.nvidia.proxy;
 
+import com.nvidia.proxy.beans.PluginSuggestion;
 import com.nvidia.proxy.beans.ServiceDetermination;
 import org.apache.spark.connect.proto.SparkConnectServiceGrpc;
 import org.sparkproject.connect.grpc.ManagedChannel;
@@ -32,7 +33,7 @@ import java.util.logging.Logger;
  * <p>Useful when you want clients to "warm up" on CPU before migrating to GPU,
  * or when GPU resources should be reserved for returning users.</p>
  */
-class CpuFirstThenGpuPolicy {
+class CpuFirstThenGpuPolicy implements ConnectPlugin {
     private static final Logger LOG = Logger.getLogger("CpuFirstThenGpuPolicy");
 
     /**
@@ -79,6 +80,11 @@ class CpuFirstThenGpuPolicy {
         return serviceIndex;
     }
 
+    @Override
+    public PluginSuggestion suggestConfigurations(String userId, String sessionId, String jobId) {
+        return null;
+    }
+
     /**
      * Releases a session and updates routing for future sessions.
      *
@@ -88,7 +94,8 @@ class CpuFirstThenGpuPolicy {
      * @param jobId    the unique client identifier
      * @param sessionId the Spark session identifier being released
      */
-    public void releaseSession(String jobId, String sessionId) {
+    @Override
+    public void releaseSession(String jobId, String userId, String sessionId, String eventLogDir) {
         Set<String> sessionIds = jobIdToSessionIdMap.get(jobId);
 
         if (sessionIds != null) {
@@ -109,6 +116,11 @@ class CpuFirstThenGpuPolicy {
             LOG.fine(String.format("[CpuFirstThenGpu] releaseSession: jobId=%s, sessionId=%s, newServiceIndex=%d",
                     jobId, sessionId, jobIdToServiceIndexMap.getOrDefault(jobId, 0)));
         }
+    }
+
+    @Override
+    public void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir) {
+
     }
 }
 
@@ -275,7 +287,18 @@ public class Router implements Closeable {
         if (plugin.isPresent()) {
             plugin.get().releaseSession(jobId, userId, sessionId, eventLogDir);
         } else {
-            inMemoryPolicy.releaseSession(jobId, sessionId);
+            inMemoryPolicy.releaseSession(jobId, userId, sessionId, eventLogDir);
+        }
+    }
+
+    public void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir) {
+        LOG.info(String.format("[Router] releaseJob: jobId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
+                jobId, userId, sessions, eventLogDir));
+
+        if (plugin.isPresent()) {
+            plugin.get().releaseJob(jobId, userId, sessions, eventLogDir);
+        } else {
+            inMemoryPolicy.releaseJob(jobId, userId, sessions, eventLogDir);
         }
     }
 

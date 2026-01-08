@@ -106,6 +106,10 @@ public class GrpcGateway {
             // Trigger releaseSession on the router
             router.releaseSession(jobId, userId, sessionId, eventLogDir);
         });
+
+        sessionManager.setOnJobFinishedCallback(jobInfo -> {
+            router.releaseJob(jobInfo.getJobId(), jobInfo.getUserId(), jobInfo.getSessionIds(), jobInfo.getEventLogDir());
+        });
     }
 
     /**
@@ -586,9 +590,6 @@ public class GrpcGateway {
             String eventLogDir = serviceInfo.eventLog();
             LOG.info(String.format("[ReleaseSession] sessionId=%s, eventLogDir=%s", ctx.sessionId(), eventLogDir));
 
-            // Remove session from tracking (explicit release, no need to wait for expiration)
-            sessionManager.removeSession(ctx.sessionId());
-            
             // Remove the cached RequestContext for this session
             requestContextCache.remove(ctx.sessionId());
             if (LOG.isLoggable(Level.FINE)) {
@@ -597,6 +598,9 @@ public class GrpcGateway {
 
             router.releaseSession(ctx.jobId(), ctx.userId(), ctx.sessionId(), eventLogDir);
 
+            // Remove session from tracking (explicit release, no need to wait for expiration)
+            sessionManager.removeSession(ctx.sessionId());
+            
             executeUnaryCall(ctx, "ReleaseSession",
                     () -> ctx.service().releaseSession(request),
                     ReleaseSessionResponse::getServerSideSessionId,

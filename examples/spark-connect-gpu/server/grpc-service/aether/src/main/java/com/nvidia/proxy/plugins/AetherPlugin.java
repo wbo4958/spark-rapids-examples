@@ -3,10 +3,7 @@ package com.nvidia.proxy.plugins;
 import com.nvidia.proxy.ConnectPlugin;
 import com.nvidia.proxy.beans.PluginSuggestion;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -46,13 +43,23 @@ public class AetherPlugin implements ConnectPlugin {
                 Objects.toString(userId, "unknown"),
                 Objects.toString(sessionId, "unknown"),
                 Objects.toString(eventLogDir, "unknown")));
+    }
+
+    @Override
+    public void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir) {
+        LOG.log(Level.INFO, () -> String.format(
+                "Releasing job for jobId=%s, userId=%s, sessions=%s, eventLogDir=%s",
+                Objects.toString(jobId, "unknown"),
+                Objects.toString(userId, "unknown"),
+                Objects.toString(sessions, "unknown"),
+                Objects.toString(eventLogDir, "unknown")));
 
         // Calculate suggestions for this jobId if not already cached.
         if (!jobIdToSuggestions.containsKey(jobId)) {
             // TODO: Calculate the suggestions for this jobId via Aether.
             String clusterType;
             Map<String, String> sparkConfigs = new HashMap<>();
-            
+
             if (jobId.equals("hello-gpu")) {
                 clusterType = "gpu";
                 sparkConfigs.put("spark.rapids.hello.cluster.type", "gpu-cluster");
@@ -67,7 +74,7 @@ public class AetherPlugin implements ConnectPlugin {
                 clusterType = "cpu";
                 sparkConfigs.put("spark.rapids.hello.jobId", jobId);
             }
-            
+
             jobIdToSuggestions.put(jobId, new PluginSuggestion(clusterType, sparkConfigs));
         }
     }

@@ -2,6 +2,8 @@ package com.nvidia.proxy;
 
 import com.nvidia.proxy.beans.PluginSuggestion;
 
+import java.util.Set;
+
 public interface ConnectPlugin {
 
     /**
@@ -34,4 +36,15 @@ public interface ConnectPlugin {
      * @param eventLogDir the directory path where Spark event logs are stored
      */
     void releaseSession(String jobId, String userId, String sessionId, String eventLogDir);
+
+    /**
+     * Releases all resources associated with a completed job.
+     * Called when all sessions associated with a job have finished or expired.
+     *
+     * @param jobId       the job id of the Spark application.
+     * @param userId      user id associated with the job.
+     * @param sessions    set of all session IDs that belonged to this job.
+     * @param eventLogDir the directory path where Spark event logs for the job are stored.
+     */
+    void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir);
 }
