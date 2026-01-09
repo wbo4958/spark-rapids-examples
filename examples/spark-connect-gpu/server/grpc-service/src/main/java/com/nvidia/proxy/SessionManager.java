@@ -23,7 +23,7 @@ import java.util.logging.Logger;
  * <ul>
  *   <li>Sessions are tracked with configurable timeout (default: 60 minutes)</li>
  *   <li>Last access time is updated on every session access</li>
- *   <li>When all sessions for a job_id expire, the onSessionExpired callback is triggered</li>
+ *   <li>When all sessions for a connect_id expire, the onSessionExpired callback is triggered</li>
  *   <li>Configure via environment variables: SESSION_TIMEOUT_MS, SESSION_MAINTENANCE_INTERVAL_MS</li>
  * </ul>
  */
@@ -34,13 +34,13 @@ public class SessionManager implements Closeable {
     private static final long DEFAULT_MAINTENANCE_INTERVAL_MS = 30 * 1000L;
 
     public static class JobInfo {
-        private final String jobId;
+        private final String connectId;
         private final String userId;
         private final Set<String> sessionIds;
         private final String eventLogDir;
 
-        JobInfo(String jobId, String userId, String eventLogDir) {
-            this.jobId = jobId;
+        JobInfo(String connectId, String userId, String eventLogDir) {
+            this.connectId = connectId;
             this.userId = userId;
             this.eventLogDir = eventLogDir;
             this.sessionIds = new HashSet<>();
@@ -50,8 +50,8 @@ public class SessionManager implements Closeable {
             this.sessionIds.addAll(sessions);
         }
 
-        public String getJobId() {
-            return jobId;
+        public String getConnectId() {
+            return connectId;
         }
 
         public String getUserId() {
@@ -71,15 +71,15 @@ public class SessionManager implements Closeable {
      * Public to allow external access in callbacks.
      */
     public static class SessionInfo {
-        private final String jobId;
+        private final String connectId;
         private final String userId;
         private final String sessionId;
         private final String eventLogDir;
         private final long sessionTimeout;
         private volatile long lastAccessTime;
 
-        SessionInfo(String jobId, String userId, String sessionId, String eventLogDir, long sessionTimeout) {
-            this.jobId = jobId;
+        SessionInfo(String connectId, String userId, String sessionId, String eventLogDir, long sessionTimeout) {
+            this.connectId = connectId;
             this.userId = userId;
             this.sessionId = sessionId;
             this.eventLogDir = eventLogDir;
@@ -95,8 +95,8 @@ public class SessionManager implements Closeable {
             return System.currentTimeMillis() - lastAccessTime > sessionTimeout;
         }
 
-        public String getJobId() {
-            return jobId;
+        public String getConnectId() {
+            return connectId;
         }
 
         public String getUserId() {
@@ -131,11 +131,11 @@ public class SessionManager implements Closeable {
     // Map sessionId to SessionInfo for tracking expiration
     private final Map<String, SessionInfo> sessionInfoMap = new ConcurrentHashMap<>();
 
-    // Map jobId to set of sessionIds for tracking when all sessions expire
-    private final Map<String, Set<String>> jobIdToSessionIds = new ConcurrentHashMap<>();
+    // Map connectId to set of sessionIds for tracking when all sessions expire
+    private final Map<String, Set<String>> connectIdToSessionIds = new ConcurrentHashMap<>();
 
-    // Map jobId to set of all sessionIds for tracking when all sessions expire
-    private final Map<String, Set<String>> jobIdToAllSessionIds = new ConcurrentHashMap<>();
+    // Map connectId to set of all sessionIds for tracking when all sessions expire
+    private final Map<String, Set<String>> connectIdToAllSessionIds = new ConcurrentHashMap<>();
 
     // Callback to trigger when all sessions for a job expire
     private Consumer<SessionInfo> onSessionExpiredCallback;
@@ -168,7 +168,7 @@ public class SessionManager implements Closeable {
 
     /**
      * Sets the callback to be invoked when a session expires.
-     * The callback receives SessionInfo containing jobId, userId, sessionId, and eventLogDir.
+     * The callback receives SessionInfo containing connectId, userId, sessionId, and eventLogDir.
      *
      * @param callback the callback to invoke on session expiration
      */
@@ -184,12 +184,12 @@ public class SessionManager implements Closeable {
      * Register or update a session with its associated job metadata.
      * This should be called when a session is first accessed or on every access to update the timer.
      *
-     * @param jobId       the job identifier
+     * @param connectId   the connect identifier
      * @param userId      the user identifier
      * @param sessionId   the session identifier
      * @param eventLogDir the event log directory (can be empty initially, will be updated)
      */
-    public void trackSession(String jobId, String userId, String sessionId, String eventLogDir, long sessionTimeout) {
+    public void trackSession(String connectId, String userId, String sessionId, String eventLogDir, long sessionTimeout) {
         SessionInfo existing = sessionInfoMap.get(sessionId);
         if (existing != null) {
             // Update access time for existing session
@@ -197,30 +197,30 @@ public class SessionManager implements Closeable {
             // Update eventLogDir if provided and different
             if (eventLogDir != null && !eventLogDir.isEmpty() && !eventLogDir.equals(existing.eventLogDir)) {
                 // Create new SessionInfo with updated eventLogDir
-                SessionInfo updated = new SessionInfo(jobId, userId, sessionId, eventLogDir, sessionTimeout);
+                SessionInfo updated = new SessionInfo(connectId, userId, sessionId, eventLogDir, sessionTimeout);
                 updated.lastAccessTime = existing.lastAccessTime;
                 sessionInfoMap.put(sessionId, updated);
             }
             if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[SessionManager] Updated session access time: sessionId=%s, jobId=%s",
-                        sessionId, jobId));
+                LOG.fine(String.format("[SessionManager] Updated session access time: sessionId=%s, connectId=%s",
+                        sessionId, connectId));
             }
         } else {
             // Create new session tracking
-            SessionInfo info = new SessionInfo(jobId, userId, sessionId, eventLogDir, sessionTimeout);
+            SessionInfo info = new SessionInfo(connectId, userId, sessionId, eventLogDir, sessionTimeout);
             sessionInfoMap.put(sessionId, info);
 
-            // Track session under jobId
-            jobIdToSessionIds
-                    .computeIfAbsent(jobId, k -> ConcurrentHashMap.newKeySet())
+            // Track session under connectId
+            connectIdToSessionIds
+                    .computeIfAbsent(connectId, k -> ConcurrentHashMap.newKeySet())
                     .add(sessionId);
-            jobIdToAllSessionIds
-                    .computeIfAbsent(jobId, k -> ConcurrentHashMap.newKeySet())
+            connectIdToAllSessionIds
+                    .computeIfAbsent(connectId, k -> ConcurrentHashMap.newKeySet())
                     .add(sessionId);
 
             if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[SessionManager] New session tracked: sessionId=%s, jobId=%s, userId=%s",
-                        sessionId, jobId, userId));
+                LOG.fine(String.format("[SessionManager] New session tracked: sessionId=%s, connectId=%s, userId=%s",
+                        sessionId, connectId, userId));
             }
         }
     }
@@ -249,14 +249,14 @@ public class SessionManager implements Closeable {
     public void removeSession(String sessionId) {
         SessionInfo info = sessionInfoMap.remove(sessionId);
         if (info != null) {
-            Set<String> sessions = jobIdToSessionIds.get(info.jobId);
+            Set<String> sessions = connectIdToSessionIds.get(info.connectId);
             if (sessions != null) {
                 sessions.remove(sessionId);
                 if (sessions.isEmpty()) {
-                    jobIdToSessionIds.remove(info.jobId);
-                    var jobInfo = new JobInfo(info.jobId, info.userId, info.eventLogDir);
-                    jobInfo.addSessions(jobIdToAllSessionIds.get(info.jobId));
-                    jobIdToAllSessionIds.remove(info.jobId);
+                    connectIdToSessionIds.remove(info.connectId);
+                    var jobInfo = new JobInfo(info.connectId, info.userId, info.eventLogDir);
+                    jobInfo.addSessions(connectIdToAllSessionIds.get(info.connectId));
+                    connectIdToAllSessionIds.remove(info.connectId);
                     if (onJobFinishedCallback != null) {
                         onJobFinishedCallback.accept(jobInfo);
                     }
@@ -266,8 +266,8 @@ public class SessionManager implements Closeable {
             clientSessionIdToServerSessionIdMap.remove(sessionId);
 
             if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[SessionManager] Session removed: sessionId=%s, jobId=%s",
-                        sessionId, info.jobId));
+                LOG.fine(String.format("[SessionManager] Session removed: sessionId=%s, connectId=%s",
+                        sessionId, info.connectId));
             }
         }
     }
@@ -289,9 +289,9 @@ public class SessionManager implements Closeable {
 
             // Process expired sessions
             for (SessionInfo expired : expiredSessions) {
-                LOG.info(String.format("[SessionManager] Session expired: sessionId=%s, jobId=%s, userId=%s, " +
+                LOG.info(String.format("[SessionManager] Session expired: sessionId=%s, connectId=%s, userId=%s, " +
                                 "lastAccessTime=%d, age=%dms",
-                        expired.sessionId, expired.jobId, expired.userId,
+                        expired.sessionId, expired.connectId, expired.userId,
                         expired.lastAccessTime, System.currentTimeMillis() - expired.lastAccessTime));
 
                 // Remove from tracking
@@ -300,30 +300,30 @@ public class SessionManager implements Closeable {
 
                 // Trigger callback for job completion
                 if (onSessionExpiredCallback != null) {
-                    LOG.info(String.format("[SessionManager] All sessions for job expired, triggering releaseSession: jobId=%s",
-                            expired.jobId));
+                    LOG.info(String.format("[SessionManager] All sessions for job expired, triggering releaseSession: connectId=%s",
+                            expired.connectId));
                     try {
                         onSessionExpiredCallback.accept(expired);
                     } catch (Exception e) {
                         LOG.log(Level.WARNING,
-                                String.format("[SessionManager] Error in session expired callback: jobId=%s", expired.jobId), e);
+                                String.format("[SessionManager] Error in session expired callback: connectId=%s", expired.connectId), e);
                     }
                 }
 
-                Set<String> jobSessions = jobIdToSessionIds.get(expired.jobId);
+                Set<String> jobSessions = connectIdToSessionIds.get(expired.connectId);
                 if (jobSessions != null) {
                     jobSessions.remove(expired.sessionId);
                     // Check if all sessions for this job have expired
                     if (jobSessions.isEmpty()) {
-                        jobIdToSessionIds.remove(expired.jobId);
+                        connectIdToSessionIds.remove(expired.connectId);
 
                         if (LOG.isLoggable(Level.INFO)) {
-                            LOG.info(String.format("[SessionManager] All sessions for jobId=%s have expired. Triggering onJobFinishedCallback.", expired.jobId));
+                            LOG.info(String.format("[SessionManager] All sessions for connectId=%s have expired. Triggering onJobFinishedCallback.", expired.connectId));
                         }
 
-                        var jobInfo = new JobInfo(expired.jobId, expired.userId, expired.eventLogDir);
-                        jobInfo.addSessions(jobIdToAllSessionIds.get(expired.jobId));
-                        jobIdToAllSessionIds.remove(expired.jobId);
+                        var jobInfo = new JobInfo(expired.connectId, expired.userId, expired.eventLogDir);
+                        jobInfo.addSessions(connectIdToAllSessionIds.get(expired.connectId));
+                        connectIdToAllSessionIds.remove(expired.connectId);
                         if (onJobFinishedCallback != null) {
                             onJobFinishedCallback.accept(jobInfo);
                         }
@@ -424,11 +424,11 @@ public class SessionManager implements Closeable {
     /**
      * Get all active session IDs for a given job.
      *
-     * @param jobId the job identifier
+     * @param connectId the connect identifier
      * @return set of session IDs, or empty set if none
      */
-    public Set<String> getSessionsForJob(String jobId) {
-        Set<String> sessions = jobIdToSessionIds.get(jobId);
+    public Set<String> getSessionsForJob(String connectId) {
+        Set<String> sessions = connectIdToSessionIds.get(connectId);
         return sessions != null ? Collections.unmodifiableSet(new HashSet<>(sessions)) : Collections.emptySet();
     }
 

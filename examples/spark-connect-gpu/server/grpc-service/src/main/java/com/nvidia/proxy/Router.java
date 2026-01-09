@@ -20,9 +20,9 @@ import java.util.logging.Logger;
  *
  * <h3>Routing Behavior:</h3>
  * <ul>
- *   <li>First session for a jobId → CPU (serviceIndex=0)</li>
+ *   <li>First session for a connectId → CPU (serviceIndex=0)</li>
  *   <li>After first session release → serviceIndex permanently set to 1 (GPU)</li>
- *   <li>All subsequent sessions for that jobId → GPU (serviceIndex=1)</li>
+ *   <li>All subsequent sessions for that connectId → GPU (serviceIndex=1)</li>
  * </ul>
  *
  * <h3>Thread Safety:</h3>
@@ -37,89 +37,89 @@ class CpuFirstThenGpuPolicy implements ConnectPlugin {
     private static final Logger LOG = Logger.getLogger("CpuFirstThenGpuPolicy");
 
     /**
-     * Maps jobId to service index (0=CPU, 1=GPU).
-     * Default is 0 (CPU) for new jobIds.
+     * Maps connectId to service index (0=CPU, 1=GPU).
+     * Default is 0 (CPU) for new connectIds.
      */
-    private final Map<String, Integer> jobIdToServiceIndexMap;
+    private final Map<String, Integer> connectIdToServiceIndexMap;
 
     /**
-     * Tracks active session IDs for each jobId.
-     * Used to determine when all sessions for a jobId have been released.
+     * Tracks active session IDs for each connectId.
+     * Used to determine when all sessions for a connectId have been released.
      */
-    private final Map<String, Set<String>> jobIdToSessionIdMap;
+    private final Map<String, Set<String>> connectIdToSessionIdMap;
 
     public CpuFirstThenGpuPolicy() {
         // Use ConcurrentHashMap for thread-safe concurrent access from gRPC threads
-        this.jobIdToServiceIndexMap = new java.util.concurrent.ConcurrentHashMap<>();
-        this.jobIdToSessionIdMap = new java.util.concurrent.ConcurrentHashMap<>();
+        this.connectIdToServiceIndexMap = new java.util.concurrent.ConcurrentHashMap<>();
+        this.connectIdToSessionIdMap = new java.util.concurrent.ConcurrentHashMap<>();
     }
 
     /**
      * Gets the service index for routing a request.
      *
-     * <p>Returns 0 (CPU) for new jobIds, or the previously stored index.
-     * Also tracks the sessionId as an active session for this jobId.</p>
+     * <p>Returns 0 (CPU) for new connectIds, or the previously stored index.
+     * Also tracks the sessionId as an active session for this connectId.</p>
      *
-     * @param jobId    the unique client identifier
+     * @param connectId the unique client identifier
      * @param sessionId the Spark session identifier
      * @return 0 for CPU routing, 1 for GPU routing
      */
-    public int getServiceIndex(String jobId, String sessionId) {
+    public int getServiceIndex(String connectId, String sessionId) {
         // Track active sessions using thread-safe set
-        jobIdToSessionIdMap
-                .computeIfAbsent(jobId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+        connectIdToSessionIdMap
+                .computeIfAbsent(connectId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
                 .add(sessionId);
 
-        // Return stored index, or default to 0 (CPU) for new jobIds
-        int serviceIndex = jobIdToServiceIndexMap.getOrDefault(jobId, 0);
+        // Return stored index, or default to 0 (CPU) for new connectIds
+        int serviceIndex = connectIdToServiceIndexMap.getOrDefault(connectId, 0);
 
         if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[CpuFirstThenGpu] getServiceIndex: jobId=%s, sessionId=%s, serviceIndex=%d, activeSessions=%s",
-                    jobId, sessionId, serviceIndex, jobIdToSessionIdMap.get(jobId)));
+            LOG.fine(String.format("[CpuFirstThenGpu] getServiceIndex: connectId=%s, sessionId=%s, serviceIndex=%d, activeSessions=%s",
+                    connectId, sessionId, serviceIndex, connectIdToSessionIdMap.get(connectId)));
         }
         return serviceIndex;
     }
 
     @Override
-    public PluginSuggestion suggestConfigurations(String userId, String sessionId, String jobId) {
+    public PluginSuggestion suggestConfigurations(String userId, String sessionId, String connectId) {
         return null;
     }
 
     /**
      * Releases a session and updates routing for future sessions.
      *
-     * <p>When all sessions for a jobId are released, the service index is set to 1 (GPU),
-     * so all future sessions for this jobId will be routed to GPU.</p>
+     * <p>When all sessions for a connectId are released, the service index is set to 1 (GPU),
+     * so all future sessions for this connectId will be routed to GPU.</p>
      *
-     * @param jobId    the unique client identifier
+     * @param connectId the unique client identifier
      * @param sessionId the Spark session identifier being released
      */
     @Override
-    public void releaseSession(String jobId, String userId, String sessionId, String eventLogDir) {
-        Set<String> sessionIds = jobIdToSessionIdMap.get(jobId);
+    public void releaseSession(String connectId, String userId, String sessionId, String eventLogDir) {
+        Set<String> sessionIds = connectIdToSessionIdMap.get(connectId);
 
         if (sessionIds != null) {
             sessionIds.remove(sessionId);
 
             // When all sessions are released, switch to GPU for future sessions
             if (sessionIds.isEmpty()) {
-                jobIdToServiceIndexMap.put(jobId, 1);
+                connectIdToServiceIndexMap.put(connectId, 1);
                 // Clean up empty session set to prevent memory leak
-                jobIdToSessionIdMap.remove(jobId);
+                connectIdToSessionIdMap.remove(connectId);
             }
         } else {
             // No active sessions tracked (edge case), default to GPU
-            jobIdToServiceIndexMap.put(jobId, 1);
+            connectIdToServiceIndexMap.put(connectId, 1);
         }
 
         if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[CpuFirstThenGpu] releaseSession: jobId=%s, sessionId=%s, newServiceIndex=%d",
-                    jobId, sessionId, jobIdToServiceIndexMap.getOrDefault(jobId, 0)));
+            LOG.fine(String.format("[CpuFirstThenGpu] releaseSession: connectId=%s, sessionId=%s, newServiceIndex=%d",
+                    connectId, sessionId, connectIdToServiceIndexMap.getOrDefault(connectId, 0)));
         }
     }
 
     @Override
-    public void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir) {
+    public void releaseJob(String connectId, String userId, Set<String> sessions, String eventLogDir) {
 
     }
 }
@@ -188,20 +188,20 @@ public class Router implements Closeable {
      * @param userId    the user identifier
      * @param sessionId the Spark session identifier
      * @param clusterId the cluster ID from HTTP header ("cpu" or "gpu"), may be null or empty
-     * @param jobId     the unique identifier for the Spark application
+     * @param connectId the unique identifier for the Spark application
      * @return the appropriate SparkConnectService blocking stub (CPU or GPU)
      */
     public ServiceDetermination determineService(
             String userId,
             String sessionId,
             String clusterId,
-            String jobId) {
+            String connectId) {
 
         SparkConnectServiceGrpc.SparkConnectServiceBlockingStub selectedService;
         Map<String, String> configs = Collections.emptyMap();
         String clusterType;
 
-        if (jobId == null || jobId.trim().isEmpty()) {
+        if (connectId == null || connectId.trim().isEmpty()) {
             // Priority 1: Check if clusterId is explicitly specified
             if (Objects.equals(clusterId, "cpu")) {
                 selectedService = cpuService;
@@ -217,15 +217,15 @@ public class Router implements Closeable {
 
             if (LOG.isLoggable(Level.FINE)) {
                 LOG.fine(String.format(
-                        "[Router] determineService: jobId=%s, userId=%s, sessionId=%s, clusterId=%s, clusterType=%s",
-                        jobId, userId, sessionId, clusterId, clusterType));
+                        "[Router] determineService: connectId=%s, userId=%s, sessionId=%s, clusterId=%s, clusterType=%s",
+                        connectId, userId, sessionId, clusterId, clusterType));
             }
             return new ServiceDetermination(selectedService, configs);
         }
 
         // Priority 2: Use plugin if present
         if (plugin.isPresent()) {
-            var suggestion = plugin.get().suggestConfigurations(userId, sessionId, jobId);
+            var suggestion = plugin.get().suggestConfigurations(userId, sessionId, connectId);
             
             // Use the plugin's cluster type recommendation for routing
             String pluginClusterType = suggestion.clusterType();
@@ -250,7 +250,7 @@ public class Router implements Closeable {
             configs = suggestion.sparkConfigurations();
         } else {
             // Priority 3: Fall back to in-memory policy
-            int serviceIndex = inMemoryPolicy.getServiceIndex(jobId, sessionId);
+            int serviceIndex = inMemoryPolicy.getServiceIndex(connectId, sessionId);
             if (serviceIndex % 2 == 0) {
                 selectedService = cpuService;
                 clusterType = "cpu(cpu-first-then-gpu)";
@@ -261,8 +261,8 @@ public class Router implements Closeable {
         }
 
         if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[Router] determineService: jobId=%s, userId=%s, sessionId=%s, clusterId=%s, clusterType=%s",
-                    jobId, userId, sessionId, clusterId, clusterType));
+            LOG.fine(String.format("[Router] determineService: connectId=%s, userId=%s, sessionId=%s, clusterId=%s, clusterType=%s",
+                    connectId, userId, sessionId, clusterId, clusterType));
         }
         if (configs == null) {
             configs = Collections.emptyMap();
@@ -275,30 +275,30 @@ public class Router implements Closeable {
      * If a plugin is present, delegates the release logic to the plugin.
      * Otherwise, falls back to the in-memory CpuFirstThenGpu policy.
      *
-     * @param jobId       the unique identifier for the Spark application
+     * @param connectId   the unique identifier for the Spark application
      * @param userId      the user identifier
      * @param sessionId   the Spark session identifier
      * @param eventLogDir the directory path where Spark event logs are stored
      */
-    public void releaseSession(String jobId, String userId, String sessionId, String eventLogDir) {
-        LOG.info(String.format("[Router] releaseSession: jobId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
-                jobId, userId, sessionId, eventLogDir));
+    public void releaseSession(String connectId, String userId, String sessionId, String eventLogDir) {
+        LOG.info(String.format("[Router] releaseSession: connectId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
+                connectId, userId, sessionId, eventLogDir));
 
         if (plugin.isPresent()) {
-            plugin.get().releaseSession(jobId, userId, sessionId, eventLogDir);
+            plugin.get().releaseSession(connectId, userId, sessionId, eventLogDir);
         } else {
-            inMemoryPolicy.releaseSession(jobId, userId, sessionId, eventLogDir);
+            inMemoryPolicy.releaseSession(connectId, userId, sessionId, eventLogDir);
         }
     }
 
-    public void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir) {
-        LOG.info(String.format("[Router] releaseJob: jobId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
-                jobId, userId, sessions, eventLogDir));
+    public void releaseJob(String connectId, String userId, Set<String> sessions, String eventLogDir) {
+        LOG.info(String.format("[Router] releaseJob: connectId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
+                connectId, userId, sessions, eventLogDir));
 
         if (plugin.isPresent()) {
-            plugin.get().releaseJob(jobId, userId, sessions, eventLogDir);
+            plugin.get().releaseJob(connectId, userId, sessions, eventLogDir);
         } else {
-            inMemoryPolicy.releaseJob(jobId, userId, sessions, eventLogDir);
+            inMemoryPolicy.releaseJob(connectId, userId, sessions, eventLogDir);
         }
     }
 

@@ -18,17 +18,17 @@ public class AetherPlugin implements ConnectPlugin {
 
     private static final Logger LOG = Logger.getLogger("AetherPlugin");
 
-    private Map<String, PluginSuggestion> jobIdToSuggestions = new HashMap<>();
+    private Map<String, PluginSuggestion> connectIdToSuggestions = new HashMap<>();
 
     @Override
-    public PluginSuggestion suggestConfigurations(String userId, String sessionId, String jobId) {
-        PluginSuggestion suggestion = jobIdToSuggestions.getOrDefault(jobId, PluginSuggestion.empty());
+    public PluginSuggestion suggestConfigurations(String userId, String sessionId, String connectId) {
+        PluginSuggestion suggestion = connectIdToSuggestions.getOrDefault(connectId, PluginSuggestion.empty());
 
         LOG.log(Level.INFO, String.format(
-                "AetherPlugin suggestions for userId=%s, sessionId=%s, jobId=%s -> clusterType=%s, sparkConfigs=%s",
+                "AetherPlugin suggestions for userId=%s, sessionId=%s, connectId=%s -> clusterType=%s, sparkConfigs=%s",
                 Objects.toString(userId, "unknown"),
                 Objects.toString(sessionId, "unknown"),
-                Objects.toString(jobId, "unknown"),
+                Objects.toString(connectId, "unknown"),
                 Objects.toString(suggestion.clusterType(), "default"),
                 suggestion.sparkConfigurations()));
 
@@ -36,46 +36,46 @@ public class AetherPlugin implements ConnectPlugin {
     }
 
     @Override
-    public void releaseSession(String jobId, String userId, String sessionId, String eventLogDir) {
+    public void releaseSession(String connectId, String userId, String sessionId, String eventLogDir) {
         LOG.log(Level.INFO, () -> String.format(
-                "Releasing session for jobId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
-                Objects.toString(jobId, "unknown"),
+                "Releasing session for connectId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
+                Objects.toString(connectId, "unknown"),
                 Objects.toString(userId, "unknown"),
                 Objects.toString(sessionId, "unknown"),
                 Objects.toString(eventLogDir, "unknown")));
     }
 
     @Override
-    public void releaseJob(String jobId, String userId, Set<String> sessions, String eventLogDir) {
+    public void releaseJob(String connectId, String userId, Set<String> sessions, String eventLogDir) {
         LOG.log(Level.INFO, () -> String.format(
-                "Releasing job for jobId=%s, userId=%s, sessions=%s, eventLogDir=%s",
-                Objects.toString(jobId, "unknown"),
+                "Releasing job for connectId=%s, userId=%s, sessions=%s, eventLogDir=%s",
+                Objects.toString(connectId, "unknown"),
                 Objects.toString(userId, "unknown"),
                 Objects.toString(sessions, "unknown"),
                 Objects.toString(eventLogDir, "unknown")));
 
-        // Calculate suggestions for this jobId if not already cached.
-        if (!jobIdToSuggestions.containsKey(jobId)) {
-            // TODO: Calculate the suggestions for this jobId via Aether.
+        // Calculate suggestions for this connectId if not already cached.
+        if (!connectIdToSuggestions.containsKey(connectId)) {
+            // TODO: Calculate the suggestions for this connectId via Aether.
             String clusterType;
             Map<String, String> sparkConfigs = new HashMap<>();
 
-            if (jobId.equals("hello-gpu")) {
+            if (connectId.equals("hello-gpu")) {
                 clusterType = "gpu";
                 sparkConfigs.put("spark.rapids.hello.cluster.type", "gpu-cluster");
                 sparkConfigs.put("spark.rapids.hello.cluster.name", "spark-connect-gpu-cluster");
-                sparkConfigs.put("spark.rapids.hello.jobId", "hello-gpu");
-            } else if (jobId.equals("hello-cpu")) {
+                sparkConfigs.put("spark.rapids.hello.connectId", "hello-gpu");
+            } else if (connectId.equals("hello-cpu")) {
                 clusterType = "cpu";
                 sparkConfigs.put("spark.rapids.hello.cluster.type", "cpu-cluster");
                 sparkConfigs.put("spark.rapids.hello.cluster.name", "spark-connect-cpu-cluster");
-                sparkConfigs.put("spark.rapids.hello.jobId", "hello-cpu");
+                sparkConfigs.put("spark.rapids.hello.connectId", "hello-cpu");
             } else {
                 clusterType = "cpu";
-                sparkConfigs.put("spark.rapids.hello.jobId", jobId);
+                sparkConfigs.put("spark.rapids.hello.connectId", connectId);
             }
 
-            jobIdToSuggestions.put(jobId, new PluginSuggestion(clusterType, sparkConfigs));
+            connectIdToSuggestions.put(connectId, new PluginSuggestion(clusterType, sparkConfigs));
         }
     }
 }
