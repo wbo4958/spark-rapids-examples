@@ -6,7 +6,6 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -53,19 +52,6 @@ public class GrpcGateway {
      * It is updated as new services are connected or new sessions are tracked.
      */
     private final Map<SparkConnectServiceGrpc.SparkConnectServiceBlockingStub, ServiceInfo> serviceInfos = new ConcurrentHashMap<>();
-    
-    /**
-     * Cache of RequestContext objects indexed by session ID.
-     *
-     * Maps session IDs to their corresponding RequestContext objects to avoid recreating
-     * the context for each request from the same session. This improves performance by
-     * reusing routing information, service stubs, and other metadata that remain constant
-     * throughout a session's lifetime.
-     *
-     * The cache is thread-safe and automatically managed - entries are created on first
-     * access and can be invalidated when sessions are released.
-     */
-    private final Map<String, RequestContext> requestContextCache = new ConcurrentHashMap<>();
 
     public GrpcGateway() {
         sessionManager = new SessionManager();
@@ -88,17 +74,9 @@ public class GrpcGateway {
             String sessionId = info.getSessionId();
             String eventLogDir = info.getEventLogDir();
 
-            var cachedContext = requestContextCache.get(sessionId);
-            var updatedContext = new RequestContext(
-                    cachedContext.userId(),
-                    cachedContext.sessionId(),
-                    cachedContext.clusterId(),
-                    cachedContext.connectId(),
-                    cachedContext.service(),
-                    cachedContext.clientObservedServerSideSessionId(),
-                    null, // Do not maintain this value.
-                    true);
-            requestContextCache.put(cachedContext.sessionId(), updatedContext);
+            // Clear suggested configs on expiration
+            info.setSuggestedConfs(null);
+            info.setSuggestedConfigsApplied(true);
 
             LOG.info(String.format("[GrpcGateway] Session expired, releasing: connectId=%s, userId=%s, sessionId=%s",
                     connectId, userId, sessionId));
@@ -116,11 +94,11 @@ public class GrpcGateway {
      * Fetches multiple Spark configurations from the upstream Spark Connect server.
      * Uses executeUnaryCall pattern to properly maintain session mappings.
      *
-     * @param ctx the request context containing service stub and session info
+     * @param session the session information containing service stub and session info
      * @param keys the configuration keys to retrieve
      * @return a map of configuration key-value pairs
      */
-    private Map<String, String> getSparkConfigs(RequestContext ctx, String... keys) {
+    private Map<String, String> getSparkConfigs(SessionInfo session, String... keys) {
         Map<String, String> configMap = new ConcurrentHashMap<>();
         
         if (keys == null || keys.length == 0) {
@@ -131,8 +109,8 @@ public class GrpcGateway {
         try {
             // Build a config request to get the specified keys
             var configReqBuilder = ConfigRequest.newBuilder()
-                    .setSessionId(ctx.sessionId())
-                    .setUserContext(UserContext.newBuilder().setUserId(ctx.userId()).build())
+                    .setSessionId(session.getSessionId())
+                    .setUserContext(UserContext.newBuilder().setUserId(session.getUserId()).build())
                     .setOperation(
                             ConfigRequest.Operation.newBuilder()
                                     .setGet(
@@ -142,11 +120,6 @@ public class GrpcGateway {
                                     ).build()
                     );
 
-            // Set clientObservedServerSideSessionId if available
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    configReqBuilder::setClientObservedServerSideSessionId,
-                    configReqBuilder::clearClientObservedServerSideSessionId
-            );
             final var finalRequest = configReqBuilder.build();
 
             // Create an observer to capture the response
@@ -170,11 +143,9 @@ public class GrpcGateway {
                 }
             };
 
-            // Use executeUnaryCall to maintain session mappings
-            executeUnaryCall(ctx, "GetSparkConfigs",
-                    () -> ctx.service().config(finalRequest),
-                    ConfigResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            // Use executeUnaryCall to get configs
+            executeUnaryCall(session, "GetSparkConfigs",
+                    () -> session.getService().config(finalRequest),
                     observer);
 
             // Log any missing configs
@@ -198,7 +169,7 @@ public class GrpcGateway {
     ) {}
 
     /**
-     * Returns (and caches) information about the upstream Spark Connect service associated with the given request context.
+     * Returns (and caches) information about the upstream Spark Connect service associated with the given session.
      *
      * Computes the Spark application ID, event log directory, and session timeout for this service,
      * then stores them in a cache for future use. The information is retrieved from the Spark configuration
@@ -206,115 +177,65 @@ public class GrpcGateway {
      *
      * This method is thread-safe; only one thread will compute and cache ServiceInfo for a given service at a time.
      *
-     * @param ctx the RequestContext containing the upstream service stub and headers/identifiers
+     * @param session the SessionInfo containing the upstream service stub and headers/identifiers
      * @return ServiceInfo containing appId, event log path, and session timeout for the service
      */
-    private synchronized ServiceInfo getServiceInfo(RequestContext ctx) {
-        if (!serviceInfos.containsKey(ctx.service())) {
-            var configs = getSparkConfigs(ctx, "spark.app.id", "spark.connect.session.manager.defaultSessionTimeout");
+    private synchronized ServiceInfo getServiceInfo(SessionInfo session) {
+        if (!serviceInfos.containsKey(session.getService())) {
+            var configs = getSparkConfigs(session, "spark.app.id", "spark.connect.session.manager.defaultSessionTimeout");
             var appId = configs.getOrDefault("spark.app.id", "");
             var eventLog = eventLogBaseDir + "/eventlog_v2_" + appId;
             var sessionTimeoutStr = configs.getOrDefault("spark.connect.session.manager.defaultSessionTimeout", "60m");
             var timeout = Utils.timeStringAsMs(sessionTimeoutStr);
             LOG.info(String.format("[getServiceInfo] Determined appId: %s, eventLog: %s, sessionTimeoutStr: %s(%ds) for service: %s",
-                    appId, eventLog, sessionTimeoutStr, timeout, ctx.service()));
-            serviceInfos.put(ctx.service(), new ServiceInfo(appId, eventLog, timeout));
+                    appId, eventLog, sessionTimeoutStr, timeout, session.getService()));
+            serviceInfos.put(session.getService(), new ServiceInfo(appId, eventLog, timeout));
         }
-        return serviceInfos.get(ctx.service());
+        return serviceInfos.get(session.getService());
     }
 
     /**
-     * Holds common request context information extracted from gRPC requests.
-     * This record encapsulates all the information needed to process a request
-     * and route it to the appropriate upstream Spark Connect server.
+     * Creates or retrieves cached SessionInfo from common request fields.
      *
-     * <p>The context is created at the beginning of each API call and passed
-     * through the request processing pipeline.</p>
-     *
-     * @param userId                            The user ID from the request's UserContext.
-     *                                          Identifies who is making the request.
-     * @param sessionId                         The client-side session ID from the incoming request.
-     *                                          This is generated by the Spark Connect client.
-     * @param clusterId                         The cluster ID extracted from gRPC metadata headers.
-     *                                          Used to select CPU or GPU service ("cpu" or "gpu").
-     * @param connectId                         The unique identifier extracted from gRPC metadata headers.
-     *                                          Used for routing requests to the appropriate upstream server.
-     * @param service                           The upstream Spark Connect service stub determined by the router.
-     *                                          All API calls will be forwarded to this service.
-     * @param clientObservedServerSideSessionId The previously observed server-side session ID for this client session.
-     *                                          If present, it will be set on outgoing requests to maintain
-     *                                          session consistency with the upstream server.
-     *                                          Empty if this is the first request for the session.
-     * @param suggestedConfs                    The suggested Spark configurations from the plugin.
-     */
-    private record RequestContext(
-            String userId,
-            String sessionId,
-            String clusterId,
-            String connectId,
-            SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service,
-            Optional<String> clientObservedServerSideSessionId,
-            Map<String, String> suggestedConfs,
-            boolean confIsSet
-    ) {
-    }
-
-    /**
-     * Creates or retrieves a cached RequestContext from common request fields.
-     *
-     * <p>This method first checks if a cached RequestContext exists for the given session ID.
-     * If found, it updates the clientObservedServerSideSessionId and returns the cached context.
-     * Otherwise, it performs the following steps to build a new context:</p>
+     * <p>This method first checks if a cached SessionInfo exists for the given session ID
+     * via SessionManager. If found, it returns the cached session. Otherwise, it performs 
+     * the following steps to build a new session:</p>
      * <ol>
      *   <li>Extracts the unique ID from the gRPC context (set by the auth interceptor)</li>
      *   <li>Extracts the cluster ID from the gRPC context (set by the auth interceptor)</li>
      *   <li>Determines which upstream Spark Connect server should handle this request
      *       based on connectId, userId, sessionId, and clusterId</li>
-     *   <li>Looks up any previously observed server-side session ID for this client session,
-     *       which will be used to maintain session consistency with the upstream server</li>
-     *   <li>Caches the created context for future requests</li>
+     *   <li>Tracks the session in SessionManager for expiration management</li>
      * </ol>
      *
      * @param sessionId The client-side session ID from the incoming gRPC request
      * @param userId    The user ID from the request's UserContext
-     * @return A fully populated RequestContext containing all information needed
+     * @return A fully populated SessionInfo containing all information needed
      * to route and process the request
      */
-    private RequestContext createRequestContext(String sessionId, String userId) {
-        // Check if we have a cached context for this session
-        RequestContext cachedContext = requestContextCache.get(sessionId);
+    private SessionInfo createRequestContext(String sessionId, String userId) {
+        Optional<SessionInfo> closedSession = sessionManager.getClosedSessionInfo(sessionId);
+        if (closedSession.isPresent()) {
+            if (LOG.isLoggable(Level.FINE)) {
+                LOG.fine(String.format("[createRequestContext] Using a closed session for sessionId=%s", sessionId));
+            }
+            return closedSession.get();
+        }
 
-        if (cachedContext != null && cachedContext.clientObservedServerSideSessionId.isEmpty()) {
-            // Update the clientObservedServerSideSessionId as it may have changed
-            Optional<String> clientObservedServerSideSessionId = 
-                    sessionManager.getServerSideSessionId(sessionId, cachedContext.service());
-            
-            // Create an updated context with the latest clientObservedServerSideSessionId
-            var updatedContext = new RequestContext(
-                    cachedContext.userId(),
-                    cachedContext.sessionId(),
-                    cachedContext.clusterId(),
-                    cachedContext.connectId(),
-                    cachedContext.service(),
-                    clientObservedServerSideSessionId,
-                    cachedContext.suggestedConfs(),
-                    cachedContext.confIsSet());
-            
-            // Update the cache with the refreshed context
-            requestContextCache.put(sessionId, updatedContext);
-            
-            // Track session for expiration management (updates access time if exists)
-            var serviceInfo = getServiceInfo(updatedContext);
-            sessionManager.trackSession(cachedContext.connectId(), userId, sessionId, 
-                    serviceInfo.eventLog(), serviceInfo.sessionTimeout());
+        // Check if we have a cached session
+        Optional<SessionInfo> cachedSession = sessionManager.getSessionInfo(sessionId);
+        if (cachedSession.isPresent()) {
+            // Update access time for session expiration tracking
+            SessionInfo session = cachedSession.get();
+            session.updateAccessTime();
             
             if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[createRequestContext] Using cached context for sessionId=%s", sessionId));
+                LOG.fine(String.format("[createRequestContext] Using cached session for sessionId=%s", sessionId));
             }
-            return updatedContext;
+            return session;
         }
         
-        // No cached context found, create a new one
+        // No cached session found, create a new one
         // Step 1: Extract unique ID from gRPC context (set by auth interceptor)
         String connectId = CONNECT_ID_CONTEXT_KEY.get();
 
@@ -325,207 +246,129 @@ public class GrpcGateway {
         var determination = router.determineService(userId, sessionId, clusterId, connectId);
         var service = determination.service();
 
-        // Step 4: Look up previously observed server-side session ID for session consistency
-        Optional<String> clientObservedServerSideSessionId = sessionManager.getServerSideSessionId(sessionId, service);
-
-        var context = new RequestContext(userId, sessionId, clusterId, connectId, service,
-                clientObservedServerSideSessionId, determination.configurations(), false);
-        var serviceInfo = getServiceInfo(context);
-        // Step 5: Track session for expiration management (updates access time if exists)
-        sessionManager.trackSession(connectId, userId, sessionId, serviceInfo.eventLog(), serviceInfo.sessionTimeout());
+        // Step 4: Create a temporary session to get service info
+        SessionInfo tempSession = new SessionInfo(connectId, userId, sessionId, clusterId, service,
+                "", 0, determination.configurations(), false);
+        var serviceInfo = getServiceInfo(tempSession);
         
-        // Step 6: Cache the context for future requests
-        requestContextCache.put(sessionId, context);
+        // Step 5: Create the actual session with proper eventLogDir and timeout
+        SessionInfo session = new SessionInfo(connectId, userId, sessionId, clusterId, service,
+                serviceInfo.eventLog(), serviceInfo.sessionTimeout(),
+                determination.configurations(), false);
+        
+        // Step 6: Track session for expiration management
+        sessionManager.trackSession(session);
         
         if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[createRequestContext] Created new context for sessionId=%s", sessionId));
+            LOG.fine(String.format("[createRequestContext] Created new session for sessionId=%s", sessionId));
         }
         
-        return context;
+        return session;
     }
 
     /**
-     * Resolves and stores the serverSideSessionId, returning the consistent session ID.
+     * Executes a unary gRPC call, passing through responses as-is from the upstream server.
      *
-     * <p>This method ensures that the same client session always receives the same
-     * server-side session ID, even if the upstream server returns different IDs
-     * across multiple requests. This is important for session consistency in a
-     * proxy environment where the client expects a stable session identifier.</p>
-     *
-     * <p>The resolution process:</p>
-     * <ol>
-     *   <li>Store the mapping between client session ID and server session ID
-     *       (the first stored value wins for consistency)</li>
-     *   <li>Retrieve the consistent session ID from the session manager</li>
-     * </ol>
-     *
-     * @param clientSessionId     The client-side session ID from the original request
-     * @param serverSideSessionId The server-side session ID returned by the upstream server
-     * @param service             The upstream Spark Connect service that returned the response
-     * @param methodName          The API method name
-     * @return The consistent session ID that should be returned to the client.
-     * This may differ from serverSideSessionId if a different ID was
-     * previously stored for this client session.
-     */
-    private String resolveSessionId(String clientSessionId, String serverSideSessionId,
-                                    SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service,
-                                    String methodName) {
-        // Store the session ID mapping (first stored value wins for consistency)
-        sessionManager.storeSessionIds(clientSessionId, serverSideSessionId, service);
-
-        // Retrieve the consistent session ID (may be different from serverSideSessionId)
-        String consistentSessionId = sessionManager.getServerSideSessionId(clientSessionId, serverSideSessionId);
-
-        if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[%s] Session ID resolved: clientSessionId=%s, serverSideSessionId=%s, consistentSessionId=%s",
-                    methodName, clientSessionId, serverSideSessionId, consistentSessionId));
-        }
-
-        return consistentSessionId;
-    }
-
-    /**
-     * Executes a unary gRPC call with common session ID handling.
-     *
-     * @param ctx              The request context
+     * @param session          The session information
      * @param methodName       The API method name
      * @param serviceCall      Supplier that makes the actual service call
-     * @param getSessionId     Function to extract serverSideSessionId from response
-     * @param updateResponse   Function to update response with consistent session ID
      * @param responseObserver The gRPC response observer
      */
     private <T> void executeUnaryCall(
-            RequestContext ctx,
+            SessionInfo session,
             String methodName,
             Supplier<T> serviceCall,
-            Function<T, String> getSessionId,
-            java.util.function.BiFunction<T, String, T> updateResponse,
             StreamObserver<T> responseObserver) {
 
         LOG.info(String.format("[%s] Request: connectId=%s, sessionId=%s, service=%s",
-                methodName, ctx.connectId(), ctx.sessionId(), ctx.service().getChannel().authority()));
+                methodName, session.getConnectId(), session.getSessionId(), session.getService().getChannel().authority()));
 
         try {
             T response = serviceCall.get();
-            String serverSideSessionId = getSessionId.apply(response);
-            String consistentSessionId = resolveSessionId(ctx.sessionId(), serverSideSessionId, ctx.service(), methodName);
-            response = updateResponse.apply(response, consistentSessionId);
 
             if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[%s] Response sent: sessionId=%s", methodName, ctx.sessionId()));
+                LOG.fine(String.format("[%s] Response sent: sessionId=%s", methodName, session.getSessionId()));
             }
             responseObserver.onNext(response);
             responseObserver.onCompleted();
         } catch (Exception e) {
-            LOG.log(Level.SEVERE, String.format("[%s] Error: sessionId=%s", methodName, ctx.sessionId()), e);
+            LOG.log(Level.SEVERE, String.format("[%s] Error: sessionId=%s", methodName, session.getSessionId()), e);
             responseObserver.onError(e);
         }
     }
 
     /**
-     * Executes a streaming gRPC call with common session ID handling.
+     * Executes a streaming gRPC call, passing through responses as-is from the upstream server.
      *
      * <p>This method handles streaming API calls (like ExecutePlan and ReattachExecute)
-     * where the upstream server returns multiple response messages. It ensures that
-     * all responses in the stream use the same consistent server-side session ID.</p>
+     * where the upstream server returns multiple response messages.</p>
      *
-     * <p>The streaming call flow:</p>
-     * <ol>
-     *   <li>Execute the upstream service call to obtain a response iterator</li>
-     *   <li>For the first response, resolve and store the server-side session ID</li>
-     *   <li>For all responses (including first), update with the consistent session ID</li>
-     *   <li>Stream each updated response back to the client</li>
-     *   <li>Signal completion when all responses have been sent</li>
-     *   <li>If any error occurs, propagate it to the client via onError</li>
-     * </ol>
-     *
-     * <p><b>Important:</b> The session ID is resolved only from the first response
-     * and reused for all subsequent responses. This ensures the client sees a
-     * consistent session ID throughout the entire streaming response.</p>
-     *
-     * @param ctx              The request context containing routing and session information
+     * @param session          The session information containing routing and session information
      * @param methodName       The API method name
      * @param serviceCall      Supplier that executes the upstream call and returns a response iterator
      * @param responseObserver The gRPC StreamObserver for sending responses back to the client
      */
     private void executeStreamingCall(
-            RequestContext ctx,
+            SessionInfo session,
             String methodName,
             Supplier<Iterator<ExecutePlanResponse>> serviceCall,
             StreamObserver<ExecutePlanResponse> responseObserver) {
 
         LOG.info(String.format("[%s] Streaming request: connectId=%s, sessionId=%s, service=%s",
-                methodName, ctx.connectId(), ctx.sessionId(), ctx.service().getChannel().authority()));
+                methodName, session.getConnectId(), session.getSessionId(), session.getService().getChannel().authority()));
 
         try {
             // Execute upstream service call to get the response iterator
             Iterator<ExecutePlanResponse> responses = serviceCall.get();
 
-            // Track consistent session ID (resolved from first response only)
-            String consistentSessionId = null;
             int responseCount = 0;
 
-            // Stream each response back to the client
+            // Stream each response back to the client as-is
             while (responses.hasNext()) {
                 ExecutePlanResponse response = responses.next();
                 responseCount++;
 
-                // Resolve session ID from the first response only
-                if (consistentSessionId == null) {
-                    consistentSessionId = resolveSessionId(
-                            ctx.sessionId(), response.getServerSideSessionId(), ctx.service(), methodName);
-                }
-
-                // Update response with consistent session ID and send to client
-                response = response.toBuilder().setServerSideSessionId(consistentSessionId).build();
                 if (responseCount == 1 && LOG.isLoggable(Level.FINE)) {
                     LOG.fine(String.format("[%s] Streaming response #%d: sessionId=%s",
-                            methodName, responseCount, ctx.sessionId()));
+                            methodName, responseCount, session.getSessionId()));
                 }
                 responseObserver.onNext(response);
             }
 
             LOG.info(String.format("[%s] Streaming completed: sessionId=%s, totalResponses=%d",
-                    methodName, ctx.sessionId(), responseCount));
+                    methodName, session.getSessionId(), responseCount));
             responseObserver.onCompleted();
         } catch (Exception e) {
-            LOG.log(Level.SEVERE, String.format("[%s] Streaming error: sessionId=%s", methodName, ctx.sessionId()), e);
+            LOG.log(Level.SEVERE, String.format("[%s] Streaming error: sessionId=%s", methodName, session.getSessionId()), e);
             responseObserver.onError(e);
         }
     }
 
     private class ProxyService extends SparkConnectServiceGrpc.SparkConnectServiceImplBase {
 
-        // TODO, set the Spark Configurations only once for a session
-        private void setSuggestedConfigurations(RequestContext ctx) {
-            // Ensure there's at least 1 recommended spark configuration.
-            if (!ctx.confIsSet() && !ctx.suggestedConfs().isEmpty()) {
+        /**
+         * Applies suggested Spark configurations to a session if not already applied.
+         * This is called once per session before the first query execution.
+         */
+        private void setSuggestedConfigurations(SessionInfo session) {
+        // Ensure there's at least 1 recommended spark configuration.
+        if (!session.isSuggestedConfigsApplied() && !session.getSuggestedConfs().isEmpty()) {
                 // Convert Map<String, String> to List<KeyValue>
-                var keyValueList = ctx.suggestedConfs().entrySet().stream()
+                var keyValueList = session.getSuggestedConfs().entrySet().stream()
                         .map(e -> KeyValue.newBuilder().setKey(e.getKey()).setValue(e.getValue()).build())
                         .toList();
 
-                var configReq =
-                        ConfigRequest.newBuilder()
-                                .setSessionId(ctx.sessionId())
-                                .setUserContext(UserContext.newBuilder().setUserId(ctx.userId()).build())
-                                .setOperation(
-                                        ConfigRequest.Operation.newBuilder()
-                                                .setSet(
-                                                        ConfigRequest.Set.newBuilder()
-                                                                .addAllPairs(keyValueList)
-                                                                .build()
-                                                ).build()
-                                ).build();
-
-                // Set clientObservedServerSideSessionId on request
-                var builder = configReq.toBuilder();
-                ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                        builder::setClientObservedServerSideSessionId,
-                        builder::clearClientObservedServerSideSessionId
-                );
-
-                final var finalRequest = builder.build();
+            final var finalRequest = ConfigRequest.newBuilder()
+                    .setSessionId(session.getSessionId())
+                    .setUserContext(UserContext.newBuilder().setUserId(session.getUserId()).build())
+                    .setOperation(
+                            ConfigRequest.Operation.newBuilder()
+                                    .setSet(
+                                            ConfigRequest.Set.newBuilder()
+                                                    .addAllPairs(keyValueList)
+                                                    .build()
+                                    ).build()
+                    ).build();
 
                 // We don't care about the response, just fake an observer.
                 var observer = new StreamObserver<ConfigResponse>() {
@@ -542,107 +385,58 @@ public class GrpcGateway {
                     }
                 };
 
-                executeUnaryCall(ctx, "Config", () -> ctx.service().config(finalRequest),
-                        ConfigResponse::getServerSideSessionId,
-                        (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+                executeUnaryCall(session, "Config", () -> session.getService().config(finalRequest),
                         observer);
 
-                // Create an updated context with the latest true confIsSet
-                var updatedContext = new RequestContext(
-                        ctx.userId(),
-                        ctx.sessionId(),
-                        ctx.clusterId(),
-                        ctx.connectId(),
-                        ctx.service(),
-                        ctx.clientObservedServerSideSessionId(),
-                        ctx.suggestedConfs(),
-                        true);
-
-                // Update the cache with the refreshed context
-                requestContextCache.put(ctx.sessionId(), updatedContext);
+                // Update the session with suggestedConfigsApplied = true
+                session.setSuggestedConfigsApplied(true);
             }
         }
 
         @Override
         public void executePlan(ExecutePlanRequest request, StreamObserver<ExecutePlanResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            setSuggestedConfigurations(ctx);
+            setSuggestedConfigurations(session);
 
-            // Set clientObservedServerSideSessionId on request
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeStreamingCall(ctx, "ExecutePlan",
-                    () -> ctx.service().executePlan(finalRequest),
+            executeStreamingCall(session, "ExecutePlan",
+                    () -> session.getService().executePlan(request),
                     responseObserver);
         }
 
         @Override
         public void releaseSession(ReleaseSessionRequest request, StreamObserver<ReleaseSessionResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            var serviceInfo = getServiceInfo(ctx);
-            String eventLogDir = serviceInfo.eventLog();
-            LOG.info(String.format("[ReleaseSession] sessionId=%s, eventLogDir=%s", ctx.sessionId(), eventLogDir));
+            String eventLogDir = session.getEventLogDir();
+            LOG.info(String.format("[ReleaseSession] sessionId=%s, eventLogDir=%s", session.getSessionId(), eventLogDir));
 
-            // Remove the cached RequestContext for this session
-            requestContextCache.remove(ctx.sessionId());
-            if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[ReleaseSession] Removed cached context for sessionId=%s", ctx.sessionId()));
-            }
-
-            router.releaseSession(ctx.connectId(), ctx.userId(), ctx.sessionId(), eventLogDir);
+            router.releaseSession(session.getConnectId(), session.getUserId(), session.getSessionId(), eventLogDir);
 
             // Remove session from tracking (explicit release, no need to wait for expiration)
-            sessionManager.removeSession(ctx.sessionId());
+            sessionManager.removeSession(session.getSessionId());
             
-            executeUnaryCall(ctx, "ReleaseSession",
-                    () -> ctx.service().releaseSession(request),
-                    ReleaseSessionResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            executeUnaryCall(session, "ReleaseSession",
+                    () -> session.getService().releaseSession(request),
                     responseObserver);
         }
 
 
         @Override
         public void analyzePlan(AnalyzePlanRequest request, StreamObserver<AnalyzePlanResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            // Set clientObservedServerSideSessionId on request
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeUnaryCall(ctx, "AnalyzePlan",
-                    () -> ctx.service().analyzePlan(finalRequest),
-                    AnalyzePlanResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            executeUnaryCall(session, "AnalyzePlan",
+                    () -> session.getService().analyzePlan(request),
                     responseObserver);
         }
 
         @Override
         public void config(ConfigRequest request, StreamObserver<ConfigResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeUnaryCall(ctx, "Config",
-                    () -> ctx.service().config(finalRequest),
-                    ConfigResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            executeUnaryCall(session, "Config",
+                    () -> session.getService().config(request),
                     responseObserver);
         }
 
@@ -658,72 +452,37 @@ public class GrpcGateway {
 
         @Override
         public void interrupt(InterruptRequest request, StreamObserver<InterruptResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeUnaryCall(ctx, "Interrupt",
-                    () -> ctx.service().interrupt(finalRequest),
-                    InterruptResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            executeUnaryCall(session, "Interrupt",
+                    () -> session.getService().interrupt(request),
                     responseObserver);
         }
 
         @Override
         public void reattachExecute(ReattachExecuteRequest request, StreamObserver<ExecutePlanResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            // Set clientObservedServerSideSessionId on request
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeStreamingCall(ctx, "ReattachExecute",
-                    () -> ctx.service().reattachExecute(finalRequest),
+            executeStreamingCall(session, "ReattachExecute",
+                    () -> session.getService().reattachExecute(request),
                     responseObserver);
         }
 
         @Override
         public void releaseExecute(ReleaseExecuteRequest request, StreamObserver<ReleaseExecuteResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeUnaryCall(ctx, "ReleaseExecute",
-                    () -> ctx.service().releaseExecute(finalRequest),
-                    ReleaseExecuteResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            executeUnaryCall(session, "ReleaseExecute",
+                    () -> session.getService().releaseExecute(request),
                     responseObserver);
         }
 
         @Override
         public void fetchErrorDetails(FetchErrorDetailsRequest request, StreamObserver<FetchErrorDetailsResponse> responseObserver) {
-            var ctx = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
-            var builder = request.toBuilder();
-            ctx.clientObservedServerSideSessionId().ifPresentOrElse(
-                    builder::setClientObservedServerSideSessionId,
-                    builder::clearClientObservedServerSideSessionId
-            );
-            final var finalRequest = builder.build();
-
-            executeUnaryCall(ctx, "FetchErrorDetails",
-                    () -> ctx.service().fetchErrorDetails(finalRequest),
-                    FetchErrorDetailsResponse::getServerSideSessionId,
-                    (resp, sessionId) -> resp.toBuilder().setServerSideSessionId(sessionId).build(),
+            executeUnaryCall(session, "FetchErrorDetails",
+                    () -> session.getService().fetchErrorDetails(request),
                     responseObserver);
         }
     }

@@ -136,7 +136,7 @@ public class Router implements Closeable {
     private CpuFirstThenGpuPolicy inMemoryPolicy;
 
     public Router() {
-        // TODO, discover the Spark Connect Server automatically.
+        // Initialize CPU channel
         this.cpuChannel = ManagedChannelBuilder
                 .forAddress("spark-connect-server-cpu", 15002)
                 .usePlaintext()
@@ -144,6 +144,7 @@ public class Router implements Closeable {
         this.cpuService = SparkConnectServiceGrpc.newBlockingStub(cpuChannel);
         LOG.info("Router initialized CPU channel: spark-connect-server-cpu:15002");
 
+        // Initialize GPU channel
         this.gpuChannel = ManagedChannelBuilder
                 .forAddress("spark-connect-server", 15002)
                 .usePlaintext()
@@ -159,9 +160,10 @@ public class Router implements Closeable {
     }
 
     /**
-     * Discover ConnectPlugin implementations using ServiceLoader.
+     * Discovers ConnectPlugin implementations using Java's ServiceLoader mechanism.
+     * Only the first discovered plugin is used.
      *
-     * @return list of discovered plugins sorted by priority (highest first)
+     * @return Optional containing the first discovered plugin, or empty if none found
      */
     private Optional<ConnectPlugin> discoverPlugins() {
         ServiceLoader<ConnectPlugin> loader = ServiceLoader.load(ConnectPlugin.class);
@@ -176,20 +178,20 @@ public class Router implements Closeable {
     }
 
     /**
-     * Determine the appropriate Spark Connect Service based on cluster ID, plugin configuration, or routing policy.
-     * <p>
-     * Priority order for service selection:
+     * Determines the appropriate Spark Connect Service based on cluster ID, plugin configuration, or routing policy.
+     * 
+     * <p>Priority order for service selection:</p>
      * <ol>
      *   <li>If clusterId is "cpu" or "gpu", use that directly</li>
-     *   <li>If a plugin is present, use the plugin's suggested configurations</li>
-     *   <li>Otherwise, fall back to the CpuFirstThenGpu policy (first session → CPU, subsequent sessions → GPU)</li>
+     *   <li>If a plugin is present, use the plugin's suggested cluster type and configurations</li>
+     *   <li>Otherwise, fall back to CpuFirstThenGpu policy (first session → CPU, subsequent → GPU)</li>
      * </ol>
      *
      * @param userId    the user identifier
      * @param sessionId the Spark session identifier
      * @param clusterId the cluster ID from HTTP header ("cpu" or "gpu"), may be null or empty
      * @param connectId the unique identifier for the Spark application
-     * @return the appropriate SparkConnectService blocking stub (CPU or GPU)
+     * @return ServiceDetermination containing the selected service stub and suggested configurations
      */
     public ServiceDetermination determineService(
             String userId,
@@ -246,7 +248,7 @@ public class Router implements Closeable {
                 clusterType = "cpu(plugin-no-type)";
             }
             
-            // Get Spark configurations (already clean - no routing metadata mixed in)
+            // Get Spark configurations from plugin
             configs = suggestion.sparkConfigurations();
         } else {
             // Priority 3: Fall back to in-memory policy
@@ -271,9 +273,8 @@ public class Router implements Closeable {
     }
 
     /**
-     * Release the session associated with the given identifiers.
-     * If a plugin is present, delegates the release logic to the plugin.
-     * Otherwise, falls back to the in-memory CpuFirstThenGpu policy.
+     * Releases a session and updates routing state for the associated connectId.
+     * Delegates to plugin if present, otherwise uses the in-memory CpuFirstThenGpu policy.
      *
      * @param connectId   the unique identifier for the Spark application
      * @param userId      the user identifier
@@ -291,6 +292,15 @@ public class Router implements Closeable {
         }
     }
 
+    /**
+     * Releases all sessions for a job (identified by connectId) and performs cleanup.
+     * Delegates to plugin if present, otherwise uses the in-memory CpuFirstThenGpu policy.
+     *
+     * @param connectId   the unique identifier for the Spark application
+     * @param userId      the user identifier
+     * @param sessions    the set of all session IDs associated with this job
+     * @param eventLogDir the directory path where Spark event logs are stored
+     */
     public void releaseJob(String connectId, String userId, Set<String> sessions, String eventLogDir) {
         LOG.info(String.format("[Router] releaseJob: connectId=%s, userId=%s, sessionId=%s, eventLogDir=%s",
                 connectId, userId, sessions, eventLogDir));

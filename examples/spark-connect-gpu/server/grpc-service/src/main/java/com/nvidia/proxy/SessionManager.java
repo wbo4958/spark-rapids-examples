@@ -1,6 +1,7 @@
 package com.nvidia.proxy;
 
-import org.apache.spark.connect.proto.SparkConnectServiceGrpc;
+import org.sparkproject.connect.guava.cache.Cache;
+import org.sparkproject.connect.guava.cache.CacheBuilder;
 
 import java.io.Closeable;
 import java.util.*;
@@ -66,76 +67,44 @@ public class SessionManager implements Closeable {
             return eventLogDir;
         }
     }
+
     /**
-     * Session metadata containing tracking information.
-     * Public to allow external access in callbacks.
+     * Helper class to track both active and historical sessions for a connectId.
+     * Encapsulates the logic for managing session lifecycle.
      */
-    public static class SessionInfo {
-        private final String connectId;
-        private final String userId;
-        private final String sessionId;
-        private final String eventLogDir;
-        private final long sessionTimeout;
-        private volatile long lastAccessTime;
-
-        SessionInfo(String connectId, String userId, String sessionId, String eventLogDir, long sessionTimeout) {
-            this.connectId = connectId;
-            this.userId = userId;
-            this.sessionId = sessionId;
-            this.eventLogDir = eventLogDir;
-            this.sessionTimeout = sessionTimeout;
-            this.lastAccessTime = System.currentTimeMillis();
+    private static class ConnectSessions {
+        // Currently active sessions that haven't been removed
+        private final Set<String> activeSessions = ConcurrentHashMap.newKeySet();
+        // All sessions ever created for this connectId (for historical tracking)
+        private final Set<String> allSessions = ConcurrentHashMap.newKeySet();
+        
+        void addSession(String sessionId) {
+            activeSessions.add(sessionId);
+            allSessions.add(sessionId);
         }
-
-        void updateAccessTime() {
-            this.lastAccessTime = System.currentTimeMillis();
+        
+        boolean removeActiveSession(String sessionId) {
+            return activeSessions.remove(sessionId);
         }
-
-        boolean isExpired() {
-            return System.currentTimeMillis() - lastAccessTime > sessionTimeout;
+        
+        boolean hasActiveSessions() {
+            return !activeSessions.isEmpty();
         }
-
-        public String getConnectId() {
-            return connectId;
-        }
-
-        public String getUserId() {
-            return userId;
-        }
-
-        public String getSessionId() {
-            return sessionId;
-        }
-
-        public String getEventLogDir() {
-            return eventLogDir;
-        }
-
-        public long getLastAccessTime() {
-            return lastAccessTime;
+        
+        Set<String> getAllSessions() {
+            return new HashSet<>(allSessions);
         }
     }
 
-    /**
-     * Maintains a mapping between client-side session IDs and server-side session IDs for Spark Connect.
-     *
-     * <p>The server-side session ID is generated/updated by the first Spark Connect Server instance
-     * that responds to a client request. This mapping ensures we can correlate client session IDs
-     * with their corresponding server-side identifiers and return the server-side ID to the client.
-     */
-    private Map<String, String> clientSessionIdToServerSessionIdMap = new ConcurrentHashMap<>();
+    // Primary map for all session tracking (expiration, metadata, routing info)
+    private final Map<String, SessionInfo> sessionStore = new ConcurrentHashMap<>();
 
-    // Map the services to the Map of client session id to server session id.
-    private Map<SparkConnectServiceGrpc.SparkConnectServiceBlockingStub, Map<String, String>> serviceToSessionIdMap = new ConcurrentHashMap<>();
+    private final Cache<String, SessionInfo> closedSessionsCache = CacheBuilder.newBuilder()
+            .maximumSize(10000)
+            .build();
 
-    // Map sessionId to SessionInfo for tracking expiration
-    private final Map<String, SessionInfo> sessionInfoMap = new ConcurrentHashMap<>();
-
-    // Map connectId to set of sessionIds for tracking when all sessions expire
-    private final Map<String, Set<String>> connectIdToSessionIds = new ConcurrentHashMap<>();
-
-    // Map connectId to set of all sessionIds for tracking when all sessions expire
-    private final Map<String, Set<String>> connectIdToAllSessionIds = new ConcurrentHashMap<>();
+    // Single map tracking both active and historical sessions per connectId
+    private final Map<String, ConnectSessions> connectIdToSessions = new ConcurrentHashMap<>();
 
     // Callback to trigger when all sessions for a job expire
     private Consumer<SessionInfo> onSessionExpiredCallback;
@@ -181,62 +150,38 @@ public class SessionManager implements Closeable {
     }
 
     /**
-     * Register or update a session with its associated job metadata.
-     * This should be called when a session is first accessed or on every access to update the timer.
+     * Tracks an existing session or creates a new one if it doesn't exist.
+     * For existing sessions, only updates the access time.
+     * 
+     * <p>Note: This method is called for session tracking/expiration purposes.
+     * The full SessionInfo (including service stub and routing info) is managed
+     * by the caller and stored in sessionStore if it's a new session.</p>
      *
-     * @param connectId   the connect identifier
-     * @param userId      the user identifier
-     * @param sessionId   the session identifier
-     * @param eventLogDir the event log directory (can be empty initially, will be updated)
+     * @param sessionInfo the complete session information
      */
-    public void trackSession(String connectId, String userId, String sessionId, String eventLogDir, long sessionTimeout) {
-        SessionInfo existing = sessionInfoMap.get(sessionId);
+    public void trackSession(SessionInfo sessionInfo) {
+        String sessionId = sessionInfo.getSessionId();
+        SessionInfo existing = sessionStore.get(sessionId);
+        
         if (existing != null) {
             // Update access time for existing session
             existing.updateAccessTime();
-            // Update eventLogDir if provided and different
-            if (eventLogDir != null && !eventLogDir.isEmpty() && !eventLogDir.equals(existing.eventLogDir)) {
-                // Create new SessionInfo with updated eventLogDir
-                SessionInfo updated = new SessionInfo(connectId, userId, sessionId, eventLogDir, sessionTimeout);
-                updated.lastAccessTime = existing.lastAccessTime;
-                sessionInfoMap.put(sessionId, updated);
-            }
             if (LOG.isLoggable(Level.FINE)) {
                 LOG.fine(String.format("[SessionManager] Updated session access time: sessionId=%s, connectId=%s",
-                        sessionId, connectId));
+                        sessionId, sessionInfo.getConnectId()));
             }
         } else {
-            // Create new session tracking
-            SessionInfo info = new SessionInfo(connectId, userId, sessionId, eventLogDir, sessionTimeout);
-            sessionInfoMap.put(sessionId, info);
+            // Register new session
+            sessionStore.put(sessionId, sessionInfo);
 
             // Track session under connectId
-            connectIdToSessionIds
-                    .computeIfAbsent(connectId, k -> ConcurrentHashMap.newKeySet())
-                    .add(sessionId);
-            connectIdToAllSessionIds
-                    .computeIfAbsent(connectId, k -> ConcurrentHashMap.newKeySet())
-                    .add(sessionId);
+            connectIdToSessions
+                    .computeIfAbsent(sessionInfo.getConnectId(), k -> new ConnectSessions())
+                    .addSession(sessionId);
 
             if (LOG.isLoggable(Level.FINE)) {
                 LOG.fine(String.format("[SessionManager] New session tracked: sessionId=%s, connectId=%s, userId=%s",
-                        sessionId, connectId, userId));
-            }
-        }
-    }
-
-    /**
-     * Updates the last access time for a session.
-     * Call this on every API request to keep the session alive.
-     *
-     * @param sessionId the session identifier
-     */
-    public void touchSession(String sessionId) {
-        SessionInfo info = sessionInfoMap.get(sessionId);
-        if (info != null) {
-            info.updateAccessTime();
-            if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine(String.format("[SessionManager] Session touched: sessionId=%s", sessionId));
+                        sessionId, sessionInfo.getConnectId(), sessionInfo.getUserId()));
             }
         }
     }
@@ -247,27 +192,26 @@ public class SessionManager implements Closeable {
      * @param sessionId the session identifier to remove
      */
     public void removeSession(String sessionId) {
-        SessionInfo info = sessionInfoMap.remove(sessionId);
+        SessionInfo info = sessionStore.remove(sessionId);
         if (info != null) {
-            Set<String> sessions = connectIdToSessionIds.get(info.connectId);
+            closedSessionsCache.put(info.getSessionId(), info);
+            ConnectSessions sessions = connectIdToSessions.get(info.getConnectId());
             if (sessions != null) {
-                sessions.remove(sessionId);
-                if (sessions.isEmpty()) {
-                    connectIdToSessionIds.remove(info.connectId);
-                    var jobInfo = new JobInfo(info.connectId, info.userId, info.eventLogDir);
-                    jobInfo.addSessions(connectIdToAllSessionIds.get(info.connectId));
-                    connectIdToAllSessionIds.remove(info.connectId);
+                sessions.removeActiveSession(sessionId);
+                // Check if all sessions for this connectId are done
+                if (!sessions.hasActiveSessions()) {
+                    connectIdToSessions.remove(info.getConnectId());
+                    var jobInfo = new JobInfo(info.getConnectId(), info.getUserId(), info.getEventLogDir());
+                    jobInfo.addSessions(sessions.getAllSessions());
                     if (onJobFinishedCallback != null) {
                         onJobFinishedCallback.accept(jobInfo);
                     }
                 }
             }
-            // Clean up session ID mappings
-            clientSessionIdToServerSessionIdMap.remove(sessionId);
 
             if (LOG.isLoggable(Level.FINE)) {
                 LOG.fine(String.format("[SessionManager] Session removed: sessionId=%s, connectId=%s",
-                        sessionId, info.connectId));
+                        sessionId, info.getConnectId()));
             }
         }
     }
@@ -280,7 +224,7 @@ public class SessionManager implements Closeable {
             List<SessionInfo> expiredSessions = new ArrayList<>();
 
             // Find all expired sessions
-            for (Map.Entry<String, SessionInfo> entry : sessionInfoMap.entrySet()) {
+            for (Map.Entry<String, SessionInfo> entry : sessionStore.entrySet()) {
                 SessionInfo info = entry.getValue();
                 if (info.isExpired()) {
                     expiredSessions.add(info);
@@ -291,39 +235,40 @@ public class SessionManager implements Closeable {
             for (SessionInfo expired : expiredSessions) {
                 LOG.info(String.format("[SessionManager] Session expired: sessionId=%s, connectId=%s, userId=%s, " +
                                 "lastAccessTime=%d, age=%dms",
-                        expired.sessionId, expired.connectId, expired.userId,
-                        expired.lastAccessTime, System.currentTimeMillis() - expired.lastAccessTime));
+                        expired.getSessionId(), expired.getConnectId(), expired.getUserId(),
+                        expired.getLastAccessTime(), System.currentTimeMillis() - expired.getLastAccessTime()));
+
+                closedSessionsCache.put(expired.getSessionId(), expired);
 
                 // Remove from tracking
-                sessionInfoMap.remove(expired.sessionId);
-                clientSessionIdToServerSessionIdMap.remove(expired.sessionId);
+                sessionStore.remove(expired.getSessionId());
 
-                // Trigger callback for job completion
+                // Trigger callback for individual session expiration
                 if (onSessionExpiredCallback != null) {
-                    LOG.info(String.format("[SessionManager] All sessions for job expired, triggering releaseSession: connectId=%s",
-                            expired.connectId));
+                    LOG.info(String.format("[SessionManager] Session expired, triggering callback: connectId=%s",
+                            expired.getConnectId()));
                     try {
                         onSessionExpiredCallback.accept(expired);
                     } catch (Exception e) {
                         LOG.log(Level.WARNING,
-                                String.format("[SessionManager] Error in session expired callback: connectId=%s", expired.connectId), e);
+                                String.format("[SessionManager] Error in session expired callback: connectId=%s", expired.getConnectId()), e);
                     }
                 }
 
-                Set<String> jobSessions = connectIdToSessionIds.get(expired.connectId);
+                // Check if all sessions for this job have expired
+                ConnectSessions jobSessions = connectIdToSessions.get(expired.getConnectId());
                 if (jobSessions != null) {
-                    jobSessions.remove(expired.sessionId);
+                    jobSessions.removeActiveSession(expired.getSessionId());
                     // Check if all sessions for this job have expired
-                    if (jobSessions.isEmpty()) {
-                        connectIdToSessionIds.remove(expired.connectId);
+                    if (!jobSessions.hasActiveSessions()) {
+                        connectIdToSessions.remove(expired.getConnectId());
 
                         if (LOG.isLoggable(Level.INFO)) {
-                            LOG.info(String.format("[SessionManager] All sessions for connectId=%s have expired. Triggering onJobFinishedCallback.", expired.connectId));
+                            LOG.info(String.format("[SessionManager] All sessions for connectId=%s have expired. Triggering onJobFinishedCallback.", expired.getConnectId()));
                         }
 
-                        var jobInfo = new JobInfo(expired.connectId, expired.userId, expired.eventLogDir);
-                        jobInfo.addSessions(connectIdToAllSessionIds.get(expired.connectId));
-                        connectIdToAllSessionIds.remove(expired.connectId);
+                        var jobInfo = new JobInfo(expired.getConnectId(), expired.getUserId(), expired.getEventLogDir());
+                        jobInfo.addSessions(jobSessions.getAllSessions());
                         if (onJobFinishedCallback != null) {
                             onJobFinishedCallback.accept(jobInfo);
                         }
@@ -333,80 +278,10 @@ public class SessionManager implements Closeable {
 
             if (!expiredSessions.isEmpty()) {
                 LOG.info(String.format("[SessionManager] Maintenance completed: expired=%d, remaining=%d",
-                        expiredSessions.size(), sessionInfoMap.size()));
+                        expiredSessions.size(), sessionStore.size()));
             }
         } catch (Exception e) {
             LOG.log(Level.WARNING, "[SessionManager] Error during maintenance", e);
-        }
-    }
-
-    /**
-     * Retrieves the server-side session ID associated with the given client-side session ID.
-     * If this is the first time this mapping is seen, stores the provided server-side session ID.
-     * Always updates session access time.
-     *
-     * @param clientSideSessionId the client-side session ID
-     * @param serverSideSessionId the server-side session ID (as reported by the upstream server)
-     * @return the stored (first-mapped) server-side session ID for the client session
-     */
-    public String getServerSideSessionId(String clientSideSessionId,
-                                         String serverSideSessionId) {
-        // Update session access time
-        touchSession(clientSideSessionId);
-
-        // Only capture the session id from the first response
-        if (!clientSessionIdToServerSessionIdMap.containsKey(clientSideSessionId)) {
-            clientSessionIdToServerSessionIdMap.put(clientSideSessionId, serverSideSessionId);
-        }
-        return clientSessionIdToServerSessionIdMap.get(clientSideSessionId);
-    }
-
-    /**
-     * Get the server side sessionId according to the client side session id and service
-     *
-     * @param clientSideSessionId client side session id
-     * @param service             the connect server
-     * @return the server side session id
-     */
-    public Optional<String> getServerSideSessionId(String clientSideSessionId,
-                                                   SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service) {
-        // Update session access time
-        touchSession(clientSideSessionId);
-
-        Optional<String> result = Optional.ofNullable(serviceToSessionIdMap.get(service))
-                .map(sessionIdMap -> sessionIdMap.get(clientSideSessionId));
-
-        if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[SessionManager] getServerSideSessionId: clientSessionId=%s, found=%s, serverSessionId=%s",
-                    clientSideSessionId, result.isPresent(), result.orElse("N/A")));
-        }
-
-        return result;
-    }
-
-    /**
-     * Save the service and the corresponding session ids.
-     * TODO: verify if the serverSideSessionId is matching with the previous one.
-     *
-     * @param clientSideSessionId client side session id
-     * @param serverSideSessionId server side session id
-     * @param service             the Spark Connect Server
-     */
-    public void storeSessionIds(String clientSideSessionId,
-                                String serverSideSessionId,
-                                SparkConnectServiceGrpc.SparkConnectServiceBlockingStub service) {
-        // Update session access time
-        touchSession(clientSideSessionId);
-
-        Map<String, String> clientToServerSessionIdMap = serviceToSessionIdMap
-                .computeIfAbsent(service, k -> new ConcurrentHashMap<>());
-
-        boolean isNewMapping = !clientToServerSessionIdMap.containsKey(clientSideSessionId);
-        clientToServerSessionIdMap.put(clientSideSessionId, serverSideSessionId);
-
-        if (LOG.isLoggable(Level.FINE)) {
-            LOG.fine(String.format("[SessionManager] storeSessionIds: clientSessionId=%s, serverSessionId=%s, isNew=%s, totalMappings=%d",
-                    clientSideSessionId, serverSideSessionId, isNewMapping, clientToServerSessionIdMap.size()));
         }
     }
 
@@ -418,27 +293,11 @@ public class SessionManager implements Closeable {
      * @return Optional containing SessionInfo if found
      */
     public Optional<SessionInfo> getSessionInfo(String sessionId) {
-        return Optional.ofNullable(sessionInfoMap.get(sessionId));
+        return Optional.ofNullable(sessionStore.get(sessionId));
     }
 
-    /**
-     * Get all active session IDs for a given job.
-     *
-     * @param connectId the connect identifier
-     * @return set of session IDs, or empty set if none
-     */
-    public Set<String> getSessionsForJob(String connectId) {
-        Set<String> sessions = connectIdToSessionIds.get(connectId);
-        return sessions != null ? Collections.unmodifiableSet(new HashSet<>(sessions)) : Collections.emptySet();
-    }
-
-    /**
-     * Get the count of active tracked sessions.
-     *
-     * @return number of active sessions
-     */
-    public int getActiveSessionCount() {
-        return sessionInfoMap.size();
+    public Optional<SessionInfo> getClosedSessionInfo(String sessionId) {
+        return Optional.ofNullable(closedSessionsCache.getIfPresent(sessionId));
     }
 
     @Override
