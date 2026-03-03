@@ -15,7 +15,7 @@
 # limitations under the License.
 
 
-FROM apache/spark:4.0.0
+FROM apache/spark:3.5.6-java17
 
 ARG CUDA_VERSION
 ARG RAPIDS_VERSION
@@ -27,6 +27,7 @@ RUN pip3 install -r /tmp/requirements.txt
 
 RUN mkdir -p /opt/spark-rapids/jars
 RUN chown -R spark:spark /opt/spark-rapids
+RUN mkdir -p /home/spark/.ivy2 && chown -R spark:spark /home/spark
 
 USER spark
 
@@ -34,6 +35,6 @@ ENV CUDA_VERSION=${CUDA_VERSION}
 ENV RAPIDS_VERSION=${RAPIDS_VERSION}
 ENV REPO_URL=${REPO_URL}
 
-RUN wget -q ${REPO_URL}/com/nvidia/rapids-4-spark_2.13/${RAPIDS_VERSION}/rapids-4-spark_2.13-${RAPIDS_VERSION}-cuda${CUDA_VERSION}.jar -O /opt/spark-rapids/jars/rapids-4-spark-sql.jar
+RUN wget -q ${REPO_URL}/com/nvidia/rapids-4-spark_2.12/${RAPIDS_VERSION}/rapids-4-spark_2.12-${RAPIDS_VERSION}-cuda${CUDA_VERSION}.jar -O /opt/spark-rapids/jars/rapids-4-spark-sql.jar
 COPY spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 COPY spark-env.sh /opt/spark/conf/spark-env.sh

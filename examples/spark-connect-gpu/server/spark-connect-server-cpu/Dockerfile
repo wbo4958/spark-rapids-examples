@@ -15,7 +15,7 @@
 # limitations under the License.
 
 
-FROM apache/spark:4.0.0
+FROM apache/spark:3.5.6-java17
 
 ARG REPO_URL
 
@@ -25,6 +25,7 @@ RUN pip3 install -r /tmp/requirements.txt
 
 RUN mkdir -p /opt/spark-rapids/jars
 RUN chown -R spark:spark /opt/spark-rapids
+RUN mkdir -p /home/spark/.ivy2 && chown -R spark:spark /home/spark
 
 USER spark
 

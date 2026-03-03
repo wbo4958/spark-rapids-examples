@@ -15,6 +15,6 @@
 # limitations under the License.
 
 
-cuml-cu12~=25.8.0
+# cuml-cu12~=25.8.0
 numpy~=1.0
-spark-rapids-ml==25.8.0
+# spark-rapids-ml==25.8.0

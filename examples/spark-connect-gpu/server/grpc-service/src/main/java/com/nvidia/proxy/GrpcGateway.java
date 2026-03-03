@@ -182,13 +182,13 @@ public class GrpcGateway {
      */
     private synchronized ServiceInfo getServiceInfo(SessionInfo session) {
         if (!serviceInfos.containsKey(session.getService())) {
-            var configs = getSparkConfigs(session, "spark.app.id", "spark.connect.session.manager.defaultSessionTimeout");
+            var configs = getSparkConfigs(session, "spark.app.id");
             var appId = configs.getOrDefault("spark.app.id", "");
             var eventLog = eventLogBaseDir + "/eventlog_v2_" + appId;
-            var sessionTimeoutStr = configs.getOrDefault("spark.connect.session.manager.defaultSessionTimeout", "60m");
-            var timeout = Utils.timeStringAsMs(sessionTimeoutStr);
-            LOG.info(String.format("[getServiceInfo] Determined appId: %s, eventLog: %s, sessionTimeoutStr: %s(%ds) for service: %s",
-                    appId, eventLog, sessionTimeoutStr, timeout, session.getService()));
+            var defaultSessionTimeout = "5m";
+            var timeout = Utils.timeStringAsMs(defaultSessionTimeout);
+            LOG.info(String.format("[getServiceInfo] Determined appId: %s, eventLog: %s, sessionTimeout: %s(%ds) for service: %s",
+                    appId, eventLog, defaultSessionTimeout, timeout, session.getService()));
             serviceInfos.put(session.getService(), new ServiceInfo(appId, eventLog, timeout));
         }
         return serviceInfos.get(session.getService());
@@ -353,7 +353,9 @@ public class GrpcGateway {
         private void setSuggestedConfigurations(SessionInfo session) {
         // Ensure there's at least 1 recommended spark configuration.
         if (!session.isSuggestedConfigsApplied() && !session.getSuggestedConfs().isEmpty()) {
-                // Convert Map<String, String> to List<KeyValue>
+            LOG.info("setSuggestedConfigurations " + session.getSuggestedConfs());
+
+            // Convert Map<String, String> to List<KeyValue>
                 var keyValueList = session.getSuggestedConfs().entrySet().stream()
                         .map(e -> KeyValue.newBuilder().setKey(e.getKey()).setValue(e.getValue()).build())
                         .toList();
@@ -403,24 +405,6 @@ public class GrpcGateway {
                     () -> session.getService().executePlan(request),
                     responseObserver);
         }
-
-        @Override
-        public void releaseSession(ReleaseSessionRequest request, StreamObserver<ReleaseSessionResponse> responseObserver) {
-            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
-
-            String eventLogDir = session.getEventLogDir();
-            LOG.info(String.format("[ReleaseSession] sessionId=%s, eventLogDir=%s", session.getSessionId(), eventLogDir));
-
-            router.releaseSession(session.getConnectId(), session.getUserId(), session.getSessionId(), eventLogDir);
-
-            // Remove session from tracking (explicit release, no need to wait for expiration)
-            sessionManager.removeSession(session.getSessionId());
-            
-            executeUnaryCall(session, "ReleaseSession",
-                    () -> session.getService().releaseSession(request),
-                    responseObserver);
-        }
-
 
         @Override
         public void analyzePlan(AnalyzePlanRequest request, StreamObserver<AnalyzePlanResponse> responseObserver) {
@@ -478,13 +462,30 @@ public class GrpcGateway {
         }
 
         @Override
-        public void fetchErrorDetails(FetchErrorDetailsRequest request, StreamObserver<FetchErrorDetailsResponse> responseObserver) {
+        public void releaseSession(ReleaseSessionRequest request, StreamObserver<ReleaseSessionResponse> responseObserver) {
             var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
 
+            String eventLogDir = session.getEventLogDir();
+            LOG.info(String.format("[ReleaseSession] sessionId=%s, eventLogDir=%s", session.getSessionId(), eventLogDir));
+
+            router.releaseSession(session.getConnectId(), session.getUserId(), session.getSessionId(), eventLogDir);
+
+            // Remove session from tracking (explicit release, no need to wait for expiration)
+            sessionManager.removeSession(session.getSessionId());
+
+            executeUnaryCall(session, "ReleaseSession",
+                    () -> session.getService().releaseSession(request),
+                    responseObserver);
+        }
+
+        @Override
+        public void fetchErrorDetails(FetchErrorDetailsRequest request, StreamObserver<FetchErrorDetailsResponse> responseObserver) {
+            var session = createRequestContext(request.getSessionId(), request.getUserContext().getUserId());
             executeUnaryCall(session, "FetchErrorDetails",
                     () -> session.getService().fetchErrorDetails(request),
                     responseObserver);
         }
+
     }
 
     private ServerInterceptor getAuthInterceptor() {

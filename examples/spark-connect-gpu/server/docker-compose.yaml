@@ -89,9 +89,10 @@ services:
       - spark-worker
     command: >
       /opt/spark/sbin/start-connect-server.sh
+        --packages org.apache.spark:spark-connect_2.12:3.5.6
         --name="GPU Cluster"
         --driver-memory=24G
-        --conf spark.executor.memory=28G
+        --conf spark.executor.memory=14G
         --conf spark.executor.cores=8
         --conf spark.cores.max=8
 
@@ -118,9 +119,10 @@ services:
       - spark-connect-server
     command: >
       /opt/spark/sbin/start-connect-server.sh
+        --packages org.apache.spark:spark-connect_2.12:3.5.6
         --name="CPU Cluster"
         --driver-memory=5G
-        --conf spark.executor.memory=28G
+        --conf spark.executor.memory=14G
         --conf spark.executor.cores=4
         --conf spark.cores.max=4
         --conf spark.driver.maxResultSize=3g

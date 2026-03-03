@@ -15,6 +15,6 @@
 # limitations under the License.
 
 
-FROM apache/spark:4.0.0
+FROM apache/spark:3.5.6-java17
 
 COPY spark-env.sh /opt/spark/conf/spark-env.sh

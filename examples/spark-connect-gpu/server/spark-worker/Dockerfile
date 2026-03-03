@@ -15,7 +15,7 @@
 # limitations under the License.
 
 
-FROM apache/spark:4.0.0
+FROM apache/spark:3.5.6-java17
 
 USER root
 COPY requirements.txt /tmp/requirements.txt

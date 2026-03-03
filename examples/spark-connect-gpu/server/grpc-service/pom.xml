@@ -28,7 +28,7 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spark.version>4.0.0</spark.version>
+        <spark.version>3.5.6</spark.version>
         <protobuf.version>4.29.3</protobuf.version>
         <protoc-jar-maven-plugin.version>3.11.4</protoc-jar-maven-plugin.version>
     </properties>
@@ -37,7 +37,7 @@
         <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-connect_2.13</artifactId>
-            <version>${spark.version}</version>
+            <version>4.0.0</version>
         </dependency>
 
         <dependency>

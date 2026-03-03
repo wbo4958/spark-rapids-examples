@@ -30,13 +30,15 @@ RUN mvn clean install -DskipTests \
 
 
 # Spark connect client image
-FROM apache/spark:4.0.0
+FROM apache/spark:3.5.6-java17
 
 USER root
 COPY --from=builder /build/target/com.nvidia.grpc-proxy-1.0-SNAPSHOT.jar /opt/spark/jars/
 RUN chown spark:spark /opt/spark/jars/com.nvidia.grpc-proxy-1.0-SNAPSHOT.jar
 COPY --from=builder /build/aether/target/connect-plugin-1.0-SNAPSHOT.jar /opt/spark/jars/
 RUN chown spark:spark /opt/spark/jars/connect-plugin-1.0-SNAPSHOT.jar
+COPY spark-connect_2.12-3.5.6.jar /opt/spark/jars/
+RUN chown spark:spark /opt/spark/jars/spark-connect_2.12-3.5.6.jar
 COPY certs /opt/spark/certs
 RUN chown -R spark:spark /opt/spark/certs
 
